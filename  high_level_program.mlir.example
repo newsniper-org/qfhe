@@ -1,0 +1,19 @@
+// high_level_program.mlir
+// 사용자가 작성한 고수준의 프로그램을 나타내는 MLIR 예시
+
+#qfhe.ciphertext_type =!qfhe.ciphertext<backend = "cpu">
+
+// main 함수: 두 숫자를 받아서 암호화하고 더한 뒤 결과를 반환
+func.func @main(%arg0: i64, %arg1: i64) -> i64 {
+  // %c0, %c1은 암호화된 상태를 나타내는 SSA 값
+  %c0 = "qfhe.encrypt"(%arg0) : (i64) -> #qfhe.ciphertext_type
+  %c1 = "qfhe.encrypt"(%arg1) : (i64) -> #qfhe.ciphertext_type
+
+  // 동형 덧셈 연산
+  %sum_ct = "qfhe.homomorphic_add"(%c0, %c1) : (#qfhe.ciphertext_type, #qfhe.ciphertext_type) -> #qfhe.ciphertext_type
+
+  // 결과 복호화
+  %result = "qfhe.decrypt"(%sum_ct) : (#qfhe.ciphertext_type) -> i64
+  
+  return %result : i64
+}
