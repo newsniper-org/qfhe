@@ -43,7 +43,7 @@ $(LIB_PATH): src/lib.rs src/core/mod.rs src/hal/mod.rs src/ffi.rs Cargo.toml bui
 	@echo "Rust library '$(LIB_NAME)' built."
 
 # Run the C executable
-run: build
+run:
 	@echo "\n--- Running Demo ---"
 	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./$(C_EXECUTABLE) ./$(C_EXECUTABLE)
 	@echo "--- End of Demo ---"
