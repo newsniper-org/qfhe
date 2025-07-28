@@ -52,5 +52,5 @@ run:
 clean:
 	@echo "Cleaning up build artifacts..."
 	@cargo clean
-	@rm -f $(C_EXECUTABLE) include/qfhe.h
+	@rm -f $(C_EXECUTABLE)
 	@echo "Cleanup complete."
