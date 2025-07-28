@@ -1,7 +1,7 @@
 use crate::core::Polynomial;
 use crate::core::{
     SecretKey, Ciphertext, QfheEngine,
-    N_DIM, Q_MOD,
+    POLYNOMIAL_DEGREE, MODULUS_Q,
     quaternion::Quaternion
 };
 use crate::hal::{CpuBackend, HardwareBackend};
@@ -36,12 +36,12 @@ impl QfheContext {
 
 // QfheEngine 구현은 이제 단순히 백엔드로 호출을 위임합니다.
 impl QfheEngine for QfheContext {
-    fn encrypt(&self, secret_key: &SecretKey,  message: u64) -> Ciphertext {
-        self.backend.encrypt(message, secret_key)
+    fn encrypt(&self, message: u64) -> Ciphertext {
+        self.backend.encrypt(message, &self.secret_key)
     }
 
-    fn decrypt(&self, secret_key: &SecretKey, ciphertext: &Ciphertext) -> u64 {
-        self.backend.decrypt(ciphertext, secret_key)
+    fn decrypt(&self, ciphertext: &Ciphertext) -> u64 {
+        self.backend.decrypt(ciphertext, &self.secret_key)
     }
 
     fn homomorphic_add(&self, ct1: &Ciphertext, ct2: &Ciphertext) -> Ciphertext {
@@ -57,12 +57,13 @@ impl QfheEngine for QfheContext {
 #[unsafe(no_mangle)]
 pub extern "C" fn qfhe_context_create() -> *mut c_void {
     let mut rng = rand::rng();
-    let secret_key_coeffs: Vec<Quaternion> = (0..N_DIM).map(|_| {
+    let secret_key_coeffs = (0..POLYNOMIAL_DEGREE).map(|_| {
+        let val = rng.random_range::<i128, _>(-1..1);
         Quaternion {
-            w: rng.random_range::<i64,_>(-1..=1).rem_euclid(Q_MOD as i64) as u64,
-            x: rng.random_range::<i64,_>(-1..=1).rem_euclid(Q_MOD as i64) as u64,
-            y: rng.random_range::<i64,_>(-1..=1).rem_euclid(Q_MOD as i64) as u64,
-            z: rng.random_range::<i64,_>(-1..=1).rem_euclid(Q_MOD as i64) as u64,
+            w: val.rem_euclid(MODULUS_Q as i128) as u128,
+            x: val.rem_euclid(MODULUS_Q as i128) as u128,
+            y: val.rem_euclid(MODULUS_Q as i128) as u128,
+            z: val.rem_euclid(MODULUS_Q as i128) as u128,
         }
     }).collect();
     let secret_key = SecretKey(Polynomial { coeffs: secret_key_coeffs });
@@ -81,6 +82,7 @@ pub extern "C" fn qfhe_context_destroy(context_ptr: *mut c_void) {
         unsafe { drop(Box::from_raw(context_ptr as *mut QfheContext)); }
     }
 }
+
 
 /// 메시지를 암호화하는 FFI 함수
 #[unsafe(no_mangle)]
@@ -108,7 +110,6 @@ pub extern "C" fn qfhe_homomorphic_add(
     let context = unsafe { &*(context_ptr as *mut QfheContext) };
     let ct1 = unsafe { &*(ciphertext1_ptr as *mut Ciphertext) };
     let ct2 = unsafe { &*(ciphertext2_ptr as *mut Ciphertext) };
-
     let result_ct = Box::new(context.homomorphic_add(ct1, ct2));
     Box::into_raw(result_ct) as *mut c_void
 }

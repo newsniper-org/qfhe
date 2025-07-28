@@ -32,7 +32,7 @@ void qfhe_context_destroy(QfheContext* context_ptr);
  * @brief 주어진 메시지를 암호화하여 암호문을 생성합니다.
  *
  * @param context_ptr 유효한 QFHE 컨텍스트에 대한 포인터.
- * @param message 암호화할 64비트 부호 없는 정수 메시지 (현재 구현에서는 0-15 사이 값).
+ * @param message 암호화할 64비트 부호 없는 정수 메시지.
  * @return 생성된 암호문에 대한 포인터. 사용 후에는 qfhe_ciphertext_destroy로 해제해야 합니다.
  */
 Ciphertext* qfhe_encrypt(QfheContext* context_ptr, uint64_t message);

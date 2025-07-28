@@ -2,20 +2,28 @@ use std::ops::{Add, Sub, Mul};
 
 // Q-FHE의 기본 연산을 위한 4원수(Quaternion)를 정의합니다.
 // SIMD 연산에 최적화될 수 있는 구조입니다. [8, 9]
-#[repr(C)]
-#[derive(Copy, Clone, Debug)]
-pub struct Quaternion { // 암호문 계수(coefficient)를 위한 소수 모듈러스
-    pub w: u64, pub x: u64, pub y: u64, pub z: u64,
+#[derive(Clone, Debug, Copy, Default)]
+pub struct Quaternion {
+    pub w: u128,
+    pub x: u128,
+    pub y: u128,
+    pub z: u128,
 }
+
 
 // 4원수 연산 구현
 impl Quaternion {
-    pub fn new(w: u64, x: u64, y: u64, z: u64) -> Self {
+    pub fn new(w: u128, x: u128, y: u128, z: u128) -> Self {
         Self { w, x, y, z }
     }
 
     pub fn zero() -> Self {
-        Self { w: 0, x: 0, y: 0, z: 0 }
+        Self::default()
+    }
+
+    // u128 스칼라 값으로부터 4원수를 생성합니다.
+    pub fn from_scalar(s: u128) -> Self {
+        Quaternion { w: s, x: 0, y: 0, z: 0 }
     }
 
     pub fn add(self, other: Self) -> Self {
@@ -45,17 +53,13 @@ impl Quaternion {
         }
     }
     
-    pub fn scale(self, scalar: u64) -> Self {
+    pub fn scale(self, scalar: u128) -> Self {
         Self {
             w: (self.w * scalar),
             x: (self.x * scalar),
             y: (self.y * scalar),
             z: (self.z * scalar),
         }
-    }
-
-    pub fn from_scalar(s: u64) -> Self {
-        Self { w: s, x: 0, y: 0, z: 0 }
     }
 }
 
