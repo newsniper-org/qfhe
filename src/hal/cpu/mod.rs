@@ -170,18 +170,17 @@ impl HardwareBackend for CpuBackend {
                 // 다항식 곱셈의 순환 구조 처리 (X^n = -1)
                 let target_index = i + j;
                 if target_index < n {
-                    result.coeffs[target_index] = result.coeffs[target_index] + product;
+                    result.coeffs[target_index].w = add_mod(result.coeffs[target_index].w , product.w, params.modulus_q);
+                    result.coeffs[target_index].x = add_mod(result.coeffs[target_index].x , product.x, params.modulus_q);
+                    result.coeffs[target_index].y = add_mod(result.coeffs[target_index].y , product.y, params.modulus_q);
+                    result.coeffs[target_index].z = add_mod(result.coeffs[target_index].z , product.z, params.modulus_q);
                 } else {
-                    result.coeffs[target_index - n] = result.coeffs[target_index - n] - product;
+                    result.coeffs[target_index - n].w = add_mod(result.coeffs[target_index - n].w, (params.modulus_q - product.w), params.modulus_q);
+                    result.coeffs[target_index - n].x = add_mod(result.coeffs[target_index - n].x, (params.modulus_q - product.x), params.modulus_q);
+                    result.coeffs[target_index - n].y = add_mod(result.coeffs[target_index - n].y, (params.modulus_q - product.y), params.modulus_q);
+                    result.coeffs[target_index - n].z = add_mod(result.coeffs[target_index - n].z, (params.modulus_q - product.z), params.modulus_q);
                 }
             }
-        }
-        // 계수별 모듈러 연산
-        for i in 0..n {
-            result.coeffs[i].w %= params.modulus_q;
-            result.coeffs[i].x %= params.modulus_q;
-            result.coeffs[i].y %= params.modulus_q;
-            result.coeffs[i].z %= params.modulus_q;
         }
         result
     }
