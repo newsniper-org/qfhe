@@ -1,6 +1,9 @@
 use super::quaternion::Quaternion;
 use crate::QfheParameters;
 
+
+use num_complex::Complex;
+
 #[derive(Clone, Debug)]
 pub struct Polynomial {
     pub coeffs: Vec<Quaternion>,
@@ -12,6 +15,32 @@ impl Polynomial {
         Polynomial {
             coeffs: vec![Quaternion::zero(); degree],
         }
+    }
+
+    /// 4원수 다항식을 두 개의 복소수 다항식으로 분해
+    pub fn to_complex_polynomials(&self) -> (Vec<Complex<u64>>, Vec<Complex<u64>>) {
+        let n = self.coeffs.len();
+        let mut p1 = Vec::with_capacity(n);
+        let mut p2 = Vec::with_capacity(n);
+
+        for q_coeff in &self.coeffs {
+            let (c1, c2) = q_coeff.to_complex_pair();
+            // u128을 u64로 변환 (NTT 모듈러스에 맞게)
+            p1.push(Complex::new(c1.re as u64, c1.im as u64));
+            p2.push(Complex::new(c2.re as u64, c2.im as u64));
+        }
+        (p1, p2)
+    }
+
+    /// 두 개의 복소수 다항식으로부터 4원수 다항식을 재구성
+    pub fn from_complex_polynomials(p1: &[Complex<u64>], p2: &[Complex<u64>]) -> Self {
+        let coeffs = p1.iter().zip(p2.iter()).map(|(c1, c2)| {
+            // u64를 u128로 변환
+            let c1_u128 = Complex::new(c1.re as u128, c1.im as u128);
+            let c2_u128 = Complex::new(c2.re as u128, c2.im as u128);
+            Quaternion::from_complex_pair(&c1_u128, &c2_u128)
+        }).collect();
+        Self { coeffs }
     }
 
     pub fn decompose(&self, base: u128, l: usize, params: &QfheParameters) -> Vec<Polynomial> {

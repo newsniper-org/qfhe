@@ -1,3 +1,4 @@
+// src/ffi.rs
 use crate::core::{
     Ciphertext, QfheEngine, Polynomial, Quaternion, SecretKey, SecurityLevel, QfheParameters, RelinearizationKey
 };
@@ -16,7 +17,7 @@ impl QfheEngine for QfheContext {
     fn encrypt(&self, message: u64) -> Ciphertext {
         self.backend.encrypt(message, &self.params, &self.secret_key)
     }
-
+    // ... 나머지 trait 구현은 동일 ...
     fn decrypt(&self, ciphertext: &Ciphertext) -> u64 {
         self.backend.decrypt(ciphertext, &self.params, &self.secret_key)
     }
@@ -34,7 +35,7 @@ impl QfheEngine for QfheContext {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn qfhe_context_create(level: SecurityLevel) -> *mut QfheContext {
+pub extern "C" fn qfhe_context_create(level: SecurityLevel) -> *mut QfheContext {
     let params = level.get_params();
     let mut rng = rand::rng();
     let k = params.module_dimension_k;
@@ -47,7 +48,8 @@ pub unsafe extern "C" fn qfhe_context_create(level: SecurityLevel) -> *mut QfheC
         Polynomial { coeffs }
     }).collect();
 
-    let backend = Box::new(CpuBackend);
+    // CpuBackend 생성 시 params를 전달
+    let backend = Box::new(CpuBackend::new(&params));
 
     let s_squared: Vec<Polynomial> = (0..k*k).map(|idx| {
         let i = idx / k;
@@ -67,6 +69,7 @@ pub unsafe extern "C" fn qfhe_context_create(level: SecurityLevel) -> *mut QfheC
     Box::into_raw(context)
 }
 
+// 나머지 FFI 함수들은 이전과 동일
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qfhe_context_destroy(context_ptr: *mut QfheContext) {
     if !context_ptr.is_null() {
@@ -75,21 +78,21 @@ pub unsafe extern "C" fn qfhe_context_destroy(context_ptr: *mut QfheContext) {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn qfhe_encrypt(context_ptr: *mut QfheContext, message: u64) -> *mut Ciphertext {
+pub extern "C" fn qfhe_encrypt(context_ptr: *mut QfheContext, message: u64) -> *mut Ciphertext {
     let context = unsafe { &*context_ptr };
     let ciphertext = Box::new(context.encrypt(message));
     Box::into_raw(ciphertext)
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn qfhe_decrypt(context_ptr: *mut QfheContext, ciphertext_ptr: *mut Ciphertext) -> u64 {
+pub extern "C" fn qfhe_decrypt(context_ptr: *mut QfheContext, ciphertext_ptr: *mut Ciphertext) -> u64 {
     let context = unsafe { &*context_ptr };
     let ciphertext = unsafe { &*ciphertext_ptr };
     context.decrypt(ciphertext)
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn qfhe_homomorphic_add(
+pub extern "C" fn qfhe_homomorphic_add(
     context_ptr: *mut QfheContext,
     ct1_ptr: *mut Ciphertext,
     ct2_ptr: *mut Ciphertext,
@@ -102,7 +105,7 @@ pub unsafe extern "C" fn qfhe_homomorphic_add(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn qfhe_homomorphic_sub(
+pub extern "C" fn qfhe_homomorphic_sub(
     context_ptr: *mut QfheContext,
     ct1_ptr: *mut Ciphertext,
     ct2_ptr: *mut Ciphertext,
@@ -115,7 +118,7 @@ pub unsafe extern "C" fn qfhe_homomorphic_sub(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn qfhe_homomorphic_mul(
+pub extern "C" fn qfhe_homomorphic_mul(
     context_ptr: *mut QfheContext,
     ct1_ptr: *mut Ciphertext,
     ct2_ptr: *mut Ciphertext,
@@ -129,7 +132,7 @@ pub unsafe extern "C" fn qfhe_homomorphic_mul(
 
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn qfhe_ciphertext_destroy(ciphertext_ptr: *mut Ciphertext) {
+pub extern "C" fn qfhe_ciphertext_destroy(ciphertext_ptr: *mut Ciphertext) {
     if !ciphertext_ptr.is_null() {
         drop(unsafe { Box::from_raw(ciphertext_ptr) });
     }

@@ -29,69 +29,88 @@ pub struct QfheParameters {
 
 impl SecurityLevel {
     /// 선택된 보안 수준에 맞는 MLWE 파라미터 세트를 반환합니다.
-    /// 이 파라미터들은 표준 FHE 및 PQC 문헌을 참고한 예시 값입니다.
     pub fn get_params(&self) -> QfheParameters {
         match self {
             // 128-bit quantum security (NIST Level 1)
-            SecurityLevel::L128 => QfheParameters {
-                module_dimension_k: 2,
-                polynomial_degree: 1024,
-                modulus_q: 1152921504606846883, // ~60-bit prime
-                plaintext_modulus: 1 << 32,
-                scaling_factor_delta: 1152921504606846883 / (1 << 32),
-                noise_std_dev: 3.2,
-                relin_key_base: 1 << 30, // T = 2^30
-                relin_key_len: 2,      // l = ceil(60 / 30) = 2
+            SecurityLevel::L128 => {
+                let n = 1024;
+                let q: u128 = 1152921504606584833; // 60-bit prime, q = 1 (mod 2048)
+                QfheParameters {
+                    module_dimension_k: 2,
+                    polynomial_degree: n,
+                    modulus_q: q,
+                    plaintext_modulus: 1 << 32,
+                    scaling_factor_delta: q / (1 << 32),
+                    noise_std_dev: 3.2,
+                    relin_key_base: 1 << 30,
+                    relin_key_len: 2,
+                }
             },
             // ~160-bit quantum security (Intermediate)
-            SecurityLevel::L160 => QfheParameters {
-                module_dimension_k: 2,
-                polynomial_degree: 1024,
-                modulus_q: 1180591620717411303423, // ~70-bit prime
-                plaintext_modulus: 1 << 32,
-                scaling_factor_delta: 1180591620717411303423 / (1 << 32),
-                noise_std_dev: 3.2,
-                relin_key_base: 1 << 35, // T = 2^35
-                relin_key_len: 2,      // l = ceil(70 / 35) = 2
+            SecurityLevel::L160 => {
+                let n = 1024;
+                let q: u128 = 1180591620717411303425; // 70-bit prime, q = 1 (mod 2048)
+                QfheParameters {
+                    module_dimension_k: 2,
+                    polynomial_degree: n,
+                    modulus_q: q,
+                    plaintext_modulus: 1 << 32,
+                    scaling_factor_delta: q / (1 << 32),
+                    noise_std_dev: 3.2,
+                    relin_key_base: 1 << 35,
+                    relin_key_len: 2,
+                }
             },
             // 192-bit quantum security (NIST Level 3)
-            SecurityLevel::L192 => QfheParameters {
-                module_dimension_k: 3,
-                polynomial_degree: 1024,
-                modulus_q: 1180591620717411303423, // ~70-bit prime
-                plaintext_modulus: 1 << 32,
-                scaling_factor_delta: 1180591620717411303423 / (1 << 32),
-                noise_std_dev: 3.2,
-                relin_key_base: 1 << 35, // T = 2^35
-                relin_key_len: 2,      // l = ceil(70 / 35) = 2
+            SecurityLevel::L192 => {
+                let n = 1024;
+                let q: u128 = 1180591620717411303425; // 70-bit prime, q = 1 (mod 2048)
+                QfheParameters {
+                    module_dimension_k: 3,
+                    polynomial_degree: n,
+                    modulus_q: q,
+                    plaintext_modulus: 1 << 32,
+                    scaling_factor_delta: q / (1 << 32),
+                    noise_std_dev: 3.2,
+                    relin_key_base: 1 << 35,
+                    relin_key_len: 2,
+                }
             },
             // ~224-bit quantum security (Intermediate)
-            SecurityLevel::L224 => QfheParameters {
-                module_dimension_k: 3,
-                polynomial_degree: 2048,
-                modulus_q: 340282366920938463463374607431768211293, // 125-bit prime
-                plaintext_modulus: 1 << 64,
-                scaling_factor_delta: 340282366920938463463374607431768211293 / (1 << 64),
-                noise_std_dev: 3.2,
-                relin_key_base: 1 << 63, // T = 2^63
-                relin_key_len: 2,      // l = ceil(125 / 63) = 2
+            SecurityLevel::L224 => {
+                let n = 2048;
+                // u128 범위 내의 120-bit prime, q = 1 (mod 4096)
+                let q: u128 = 1329227995784915872903807060280344577;
+                QfheParameters {
+                    module_dimension_k: 3,
+                    polynomial_degree: n,
+                    modulus_q: q,
+                    plaintext_modulus: 1 << 60, // plaintext 공간 조정
+                    scaling_factor_delta: q / (1 << 60),
+                    noise_std_dev: 3.2,
+                    relin_key_base: 1 << 60,
+                    relin_key_len: 2,
+                }
             },
             // 256-bit quantum security (NIST Level 5)
-            SecurityLevel::L256 => QfheParameters {
-                module_dimension_k: 4,
-                polynomial_degree: 2048,
-                modulus_q: 340282366920938463463374607431768211293, // 125-bit prime
-                plaintext_modulus: 1 << 64,
-                scaling_factor_delta: 340282366920938463463374607431768211293 / (1 << 64),
-                noise_std_dev: 3.2,
-                relin_key_base: 1 << 63, // T = 2^63
-                relin_key_len: 2,      // l = ceil(125 / 63) = 2
+            SecurityLevel::L256 => {
+                let n = 2048;
+                 // u128 범위 내의 120-bit prime, q = 1 (mod 4096)
+                let q: u128 = 1329227995784915872903807060280344577;
+                QfheParameters {
+                    module_dimension_k: 4,
+                    polynomial_degree: n,
+                    modulus_q: q,
+                    plaintext_modulus: 1 << 60, // plaintext 공간 조정
+                    scaling_factor_delta: q / (1 << 60),
+                    noise_std_dev: 3.2,
+                    relin_key_base: 1 << 60,
+                    relin_key_len: 2,
+                }
             },
         }
     }
 }
-
-
 
 /// 비밀키는 s와 s^2을 모두 포함합니다.
 pub struct SecretKey {

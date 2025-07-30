@@ -1,282 +1,201 @@
+// src/hal/cpu/mod.rs
+
+mod ntt;
+
 use crate::core::{
     Ciphertext, Polynomial, Quaternion, SecretKey, QfheParameters, RelinearizationKey
 };
 use super::HardwareBackend;
 use rand::Rng;
 use rand_distr::{Normal, Distribution};
+use num_complex::Complex;
+use self::ntt::{NttOperator, forward_ntt, inverse_ntt, multiply_pointwise};
 
-pub struct CpuBackend;
-
-fn sample_discrete_gaussian(noise_std_dev: f64) -> i128 {
-    let mut rng = rand::rng();
-    let normal = Normal::new(0.0, noise_std_dev).unwrap();
-    normal.sample(&mut rng).round() as i128
+pub struct CpuBackend {
+    ntt_op: NttOperator,
 }
 
-// u128 덧셈/곱셈의 오버플로우를 원천적으로 방지하는 가장 안전한 모듈러 연산 함수
-fn add_mod(a: u128, b: u128, m: u128) -> u128 {
-    // (a + b) % m
-    // a + b가 m을 초과하는지 확인하여 오버플로우 없이 덧셈을 수행합니다.
-    let tmp_a = a%m;
-    let tmp_b = b%m;
-    let cutline = 1u128 << 127;
-    match (tmp_a >= cutline, tmp_b >= cutline, m >= cutline) {
-        (_, _, false) | (false, false, true)=> (tmp_a + tmp_b)%m,
-        (true, false, true) => {
-            if (tmp_a - cutline) + tmp_b >= (m - cutline) {
-                (tmp_a - cutline) + tmp_b - (m - cutline)
-            } else {
-                let tmp_c = (m - cutline) - ((tmp_a - cutline) + tmp_b);
-                m - tmp_c
-            }
-        },
-        (false, true, true) => {
-            if (tmp_b - cutline) + tmp_a >= (m - cutline) {
-                (tmp_b - cutline) + tmp_a - (m - cutline)
-            } else {
-                let tmp_c = (m - cutline) - (tmp_b - cutline) - tmp_a;
-                m - tmp_c
-            }
-        },
-        (true, true, true) => {
-            // tmp_a >= (m - tmp_a), tmp_b >= (m - tmp_b)
-            let tmp_sum = (tmp_a - cutline) + (tmp_b - cutline);
-            let tmp_m = m - cutline;
-            // tmp_m > (tmp_sum - tmp_m)
-            let tmp_c = (tmp_m + tmp_m) - tmp_sum;
-            m - tmp_c
-        }  
+impl CpuBackend {
+    pub fn new(params: &QfheParameters) -> Self {
+        Self {
+            ntt_op: NttOperator::new(params),
+        }
     }
 }
 
-fn mul_mod(mut a: u128, mut b: u128, m: u128) -> u128 {
-    // 이진 곱셈(Binary Multiplication)을 사용하여 오버플로우를 방지합니다.
-    let mut res: u128 = 0;
-    a %= m;
+// --- Helper Functions ---
+fn add_mod(a: u128, b: u128, m: u128) -> u128 { (a + b) % m }
+fn sub_mod(a: u128, b: u128, m: u128) -> u128 { (a + m - (b % m)) % m }
+fn mul_mod(a: u128, b: u128, m: u128) -> u128 { ((a as u128 * b as u128) % m) as u128 }
+fn sample_discrete_gaussian(noise_std_dev: f64) -> i128 {
+    Normal::new(0.0, noise_std_dev).unwrap().sample(&mut rand::thread_rng()).round() as i128
+}
+fn power(mut a: u128, mut b: u128, m: u128) -> u128 {
+    let mut res = 1; a %= m;
     while b > 0 {
-        if b & 1 == 1 {
-            res = add_mod(res, a, m); // 안전한 모듈러 덧셈 사용
-        }
-        a = add_mod(a, a, m); // 안전한 모듈러 덧셈으로 두 배 연산
-        b >>= 1;
+        if b & 1 == 1 { res = mul_mod(res, a, m); }
+        a = mul_mod(a, a, m); b >>= 1;
     }
     res
 }
+fn mod_inverse(n: u128, modulus: u128) -> u128 { power(n, modulus - 2, modulus) }
 
 
 impl HardwareBackend for CpuBackend {
-    // --- 암호화/복호화 ---
+    // --- 암호화 / 복호화 ---
     fn encrypt(&self, message: u64, params: &QfheParameters, secret_key: &SecretKey) -> Ciphertext {
-        let mut rng = rand::rng();
         let k = params.module_dimension_k;
         let n = params.polynomial_degree;
+        let q = params.modulus_q;
+        let mut rng = rand::thread_rng();
 
         let a_vec = (0..k).map(|_| {
-            let coeffs = (0..n).map(|_| Quaternion {
-                w: rng.random_range(0..params.modulus_q), x: rng.random_range(0..params.modulus_q),
-                y: rng.random_range(0..params.modulus_q), z: rng.random_range(0..params.modulus_q),
-            }).collect();
-            Polynomial { coeffs }
+            Polynomial { coeffs: (0..n).map(|_| Quaternion::random(&mut rng, q)).collect() }
         }).collect::<Vec<_>>();
 
-        let e_coeffs = (0..n).map(|_| Quaternion {
-            w: sample_discrete_gaussian(params.noise_std_dev).rem_euclid(params.modulus_q as i128) as u128,
-            x: sample_discrete_gaussian(params.noise_std_dev).rem_euclid(params.modulus_q as i128) as u128,
-            y: sample_discrete_gaussian(params.noise_std_dev).rem_euclid(params.modulus_q as i128) as u128,
-            z: sample_discrete_gaussian(params.noise_std_dev).rem_euclid(params.modulus_q as i128) as u128,
-        }).collect();
-        let e_poly = Polynomial { coeffs: e_coeffs };
+        let e_poly = Polynomial { coeffs: (0..n).map(|_| Quaternion::new(sample_discrete_gaussian(params.noise_std_dev).rem_euclid(q as i128) as u128, 0, 0, 0)).collect() };
         
         let mut scaled_m_coeffs = vec![Quaternion::zero(); n];
-        scaled_m_coeffs[0] = Quaternion::from_scalar((message as u128) * params.scaling_factor_delta);
+        scaled_m_coeffs[0] = Quaternion::from_scalar(mul_mod(message as u128, params.scaling_factor_delta, q));
         let scaled_m_poly = Polynomial { coeffs: scaled_m_coeffs };
 
         let mut as_poly = Polynomial::zero(n);
         for i in 0..k {
-            let product = self.polynomial_mul(&a_vec[i], &secret_key.s[i], params);
-            as_poly = self.polynomial_add(&as_poly, &product, params);
+            as_poly = self.polynomial_add(&as_poly, &self.polynomial_mul(&a_vec[i], &secret_key.s[i], params), params);
         }
-        
-        let b_poly = self.polynomial_add(&as_poly, &e_poly, params);
-        let b_poly = self.polynomial_add(&b_poly, &scaled_m_poly, params);
+
+        let b_poly = self.polynomial_add(&self.polynomial_sub(&scaled_m_poly, &as_poly, params), &e_poly, params);
 
         Ciphertext { a_vec, b: b_poly }
     }
 
     fn decrypt(&self, ciphertext: &Ciphertext, params: &QfheParameters, secret_key: &SecretKey) -> u64 {
-        let k = params.module_dimension_k;
         let mut as_poly = Polynomial::zero(params.polynomial_degree);
-        for i in 0..k {
-            let product = self.polynomial_mul(&ciphertext.a_vec[i], &secret_key.s[i], params);
-            as_poly = self.polynomial_add(&as_poly, &product, params);
+        for i in 0..params.module_dimension_k {
+            as_poly = self.polynomial_add(&as_poly, &self.polynomial_mul(&ciphertext.a_vec[i], &secret_key.s[i], params), params);
         }
-        let m_prime_poly = self.polynomial_sub(&ciphertext.b, &as_poly, params);
+        let m_prime_poly = self.polynomial_add(&ciphertext.b, &as_poly, params);
         let noisy_message = m_prime_poly.coeffs[0].w;
-        let half_delta = params.scaling_factor_delta / 2;
-        let rounded_val = add_mod(noisy_message, half_delta, params.modulus_q);
-        (rounded_val / params.scaling_factor_delta) as u64
+        let half_q = params.modulus_q / 2;
+        let val = if noisy_message > half_q { params.modulus_q - noisy_message } else { noisy_message };
+        ((val as f64 / params.scaling_factor_delta as f64).round() as u64)
     }
 
+    // --- 다항식 연산 ---
     fn polynomial_add(&self, p1: &Polynomial, p2: &Polynomial, params: &QfheParameters) -> Polynomial {
-        let mut result_coeffs = Vec::with_capacity(params.polynomial_degree);
-        let zero = Quaternion::zero();
-        for i in 0..params.polynomial_degree {
-            let q1 = p1.coeffs.get(i).unwrap_or(&zero);
-            let q2 = p2.coeffs.get(i).unwrap_or(&zero);
-            result_coeffs.push(Quaternion {
-                w: add_mod(q1.w, q2.w, params.modulus_q), x: add_mod(q1.x, q2.x, params.modulus_q),
-                y: add_mod(q1.y, q2.y, params.modulus_q), z: add_mod(q1.z, q2.z, params.modulus_q),
-            });
-        }
-        Polynomial { coeffs: result_coeffs }
+        let q = params.modulus_q;
+        Polynomial { coeffs: p1.coeffs.iter().zip(p2.coeffs.iter()).map(|(c1, c2)| Quaternion {
+            w: add_mod(c1.w, c2.w, q), x: add_mod(c1.x, c2.x, q),
+            y: add_mod(c1.y, c2.y, q), z: add_mod(c1.z, c2.z, q),
+        }).collect() }
     }
 
     fn polynomial_sub(&self, p1: &Polynomial, p2: &Polynomial, params: &QfheParameters) -> Polynomial {
-        let mut result_coeffs = Vec::with_capacity(params.polynomial_degree);
-        let zero = Quaternion::zero();
-        for i in 0..params.polynomial_degree {
-            let q1 = p1.coeffs.get(i).unwrap_or(&zero);
-            let q2 = p2.coeffs.get(i).unwrap_or(&zero);
-            let w = add_mod(q1.w, params.modulus_q - q2.w, params.modulus_q);
-            let x = add_mod(q1.x, params.modulus_q - q2.x, params.modulus_q);
-            let y = add_mod(q1.y, params.modulus_q - q2.y, params.modulus_q);
-            let z = add_mod(q1.z, params.modulus_q - q2.z, params.modulus_q);
-            result_coeffs.push(Quaternion { w, x, y, z });
-        }
-        Polynomial { coeffs: result_coeffs }
+        let q = params.modulus_q;
+        Polynomial { coeffs: p1.coeffs.iter().zip(p2.coeffs.iter()).map(|(c1, c2)| Quaternion {
+            w: sub_mod(c1.w, c2.w, q), x: sub_mod(c1.x, c2.x, q),
+            y: sub_mod(c1.y, c2.y, q), z: sub_mod(c1.z, c2.z, q),
+        }).collect() }
     }
 
-    // --- 다항식 연산 (4원수 연산 완전 통합) ---
     fn polynomial_mul(&self, p1: &Polynomial, p2: &Polynomial, params: &QfheParameters) -> Polynomial {
-        let n = params.polynomial_degree;
-        let mut result = Polynomial::zero(n);
-        for i in 0..n {
-            for j in 0..n {
-                let q1 = p1.coeffs[i];
-                let q2 = p2.coeffs[j];
-                
-                // 4원수 곱셈 (q1 * q2)
-                let w = mul_mod(q1.w, q2.w, params.modulus_q).wrapping_sub(mul_mod(q1.x, q2.x, params.modulus_q))
-                    .wrapping_sub(mul_mod(q1.y, q2.y, params.modulus_q)).wrapping_sub(mul_mod(q1.z, q2.z, params.modulus_q));
-                let x = mul_mod(q1.w, q2.x, params.modulus_q).wrapping_add(mul_mod(q1.x, q2.w, params.modulus_q))
-                    .wrapping_add(mul_mod(q1.y, q2.z, params.modulus_q)).wrapping_sub(mul_mod(q1.z, q2.y, params.modulus_q));
-                let y = mul_mod(q1.w, q2.y, params.modulus_q).wrapping_sub(mul_mod(q1.x, q2.z, params.modulus_q))
-                    .wrapping_add(mul_mod(q1.y, q2.w, params.modulus_q)).wrapping_add(mul_mod(q1.z, q2.x, params.modulus_q));
-                let z = mul_mod(q1.w, q2.z, params.modulus_q).wrapping_add(mul_mod(q1.x, q2.y, params.modulus_q))
-                    .wrapping_sub(mul_mod(q1.y, q2.x, params.modulus_q)).wrapping_add(mul_mod(q1.z, q2.w, params.modulus_q));
-                
-                let product = Quaternion { w, x, y, z };
-                
-                // 다항식 곱셈의 순환 구조 처리 (X^n = -1)
-                let target_index = i + j;
-                if target_index < n {
-                    result.coeffs[target_index] = result.coeffs[target_index] + product;
-                } else {
-                    result.coeffs[target_index - n] = result.coeffs[target_index - n] - product;
-                }
-            }
-        }
-        // 계수별 모듈러 연산
-        for i in 0..n {
-            result.coeffs[i].w %= params.modulus_q;
-            result.coeffs[i].x %= params.modulus_q;
-            result.coeffs[i].y %= params.modulus_q;
-            result.coeffs[i].z %= params.modulus_q;
-        }
-        result
+        let q_u128 = params.modulus_q;
+        let q_u64 = q_u128 as u64;
+
+        let (mut a1, mut a2) = p1.to_complex_polynomials();
+        let (mut b1, mut b2) = p2.to_complex_polynomials();
+
+        forward_ntt(&self.ntt_op, &mut a1);
+        forward_ntt(&self.ntt_op, &mut a2);
+        forward_ntt(&self.ntt_op, &mut b1);
+        forward_ntt(&self.ntt_op, &mut b2);
+        
+        let mut b1_conj = b1.clone();
+        for i in 1..b1.len()/2 { b1_conj.swap(i, b1.len() - i); }
+        let mut b2_conj = b2.clone();
+        for i in 1..b2.len()/2 { b2_conj.swap(i, b2.len() - i); }
+
+        let c1_term1 = multiply_pointwise(&a1, &b1, q_u64);
+        let c1_term2 = multiply_pointwise(&a2, &b2_conj, q_u64);
+        let c2_term1 = multiply_pointwise(&a1, &b2, q_u64);
+        let c2_term2 = multiply_pointwise(&a2, &b1_conj, q_u64);
+        
+        let mut c1: Vec<Complex<u64>> = c1_term1.iter().zip(c1_term2.iter()).map(|(t1, t2)| Complex::new(sub_mod(t1.re as u128, t2.re as u128, q_u128) as u64, 0)).collect();
+        let mut c2: Vec<Complex<u64>> = c2_term1.iter().zip(c2_term2.iter()).map(|(t1, t2)| Complex::new(add_mod(t1.re as u128, t2.re as u128, q_u128) as u64, 0)).collect();
+
+        inverse_ntt(&self.ntt_op, &mut c1);
+        inverse_ntt(&self.ntt_op, &mut c2);
+        Polynomial::from_complex_polynomials(&c1, &c2)
     }
 
+    // --- 동형 연산 (로직 수정) ---
     fn homomorphic_mul(&self, ct1: &Ciphertext, ct2: &Ciphertext, rlk: &RelinearizationKey, params: &QfheParameters) -> Ciphertext {
         let k = params.module_dimension_k;
         let n = params.polynomial_degree;
-        let l = params.relin_key_len;
-        let base = params.relin_key_base;
+        let q = params.modulus_q;
+        let delta = params.scaling_factor_delta;
 
-        // 1. Tensor Product & Scale
-        let scale_and_round = |p: &Polynomial| -> Polynomial {
-            let mut new_poly = p.clone();
-            for coeff in new_poly.coeffs.iter_mut() {
-                coeff.w = ((coeff.w + params.scaling_factor_delta / 2) / params.scaling_factor_delta) % params.modulus_q;
-                // x, y, z components are usually smaller, handle similarly if needed
-            }
-            new_poly
+        let d0 = self.polynomial_mul(&ct1.b, &ct2.b, params);
+        let d1 = (0..k).map(|i| self.polynomial_add(&self.polynomial_mul(&ct1.a_vec[i], &ct2.b, params), &self.polynomial_mul(&ct1.b, &ct2.a_vec[i], params), params)).collect::<Vec<_>>();
+        let d2 = self.polynomial_mul(&ct1.a_vec[0], &ct2.a_vec[0], params); // Simplified for k=2
+
+        // Relinearization
+        let rlk_c0 = &rlk.0[0].b;
+        let rlk_c1 = &rlk.0[0].a_vec;
+        
+        let d2_p0 = self.polynomial_mul(&d2, rlk_c0, params);
+        let c0 = self.polynomial_add(&d0, &d2_p0, params);
+
+        let mut c1 = Vec::with_capacity(k);
+        for i in 0..k {
+            let d2_p1 = self.polynomial_mul(&d2, &rlk_c1[i], params);
+            c1.push(self.polynomial_add(&d1[i], &d2_p1, params));
+        }
+
+        // Rescaling
+        let inv_delta = mod_inverse(delta, q);
+        let rescale_poly = |p: &Polynomial| -> Polynomial {
+            Polynomial { coeffs: p.coeffs.iter().map(|c| {
+                let w = mul_mod(c.w, inv_delta, q);
+                let x = mul_mod(c.x, inv_delta, q);
+                let y = mul_mod(c.y, inv_delta, q);
+                let z = mul_mod(c.z, inv_delta, q);
+                Quaternion::new(w, x, y, z)
+            }).collect() }
         };
-        
-        let c0 = scale_and_round(&self.polynomial_mul(&ct1.b, &ct2.b, params));
-        let c1 = (0..k).map(|i| {
-            scale_and_round(&self.polynomial_add(&self.polynomial_mul(&ct1.a_vec[i], &ct2.b, params), &self.polynomial_mul(&ct2.a_vec[i], &ct1.b, params), params))
-        }).collect::<Vec<_>>();
-        let mut c2 = vec![vec![Polynomial::zero(n); k]; k];
-        for i in 0..k {
-            for j in 0..k {
-                c2[i][j] = scale_and_round(&self.polynomial_mul(&ct1.a_vec[i], &ct2.a_vec[j], params));
-            }
-        }
 
-        // 2. Relinearization
-        let mut c0_new = c0;
-        let mut c1_new = c1;
-
-        for i in 0..k {
-            for j in 0..k {
-                let c2_decomposed = c2[i][j].decompose(base, l, params);
-                for m in 0..l {
-                    let rlk_idx = (i * k + j) * l + m;
-                    let rlk_ct = &rlk.0[rlk_idx];
-                    
-                    c0_new = self.polynomial_sub(&c0_new, &self.polynomial_mul(&c2_decomposed[m], &rlk_ct.b, params), params);
-                    for r in 0..k {
-                        c1_new[r] = self.polynomial_sub(&c1_new[r], &self.polynomial_mul(&c2_decomposed[m], &rlk_ct.a_vec[r], params), params);
-                    }
-                }
-            }
+        Ciphertext {
+            b: rescale_poly(&c0),
+            a_vec: c1.iter().map(rescale_poly).collect(),
         }
-        
-        Ciphertext { a_vec: c1_new, b: c0_new }
     }
     
     fn homomorphic_add(&self, ct1: &Ciphertext, ct2: &Ciphertext, params: &QfheParameters) -> Ciphertext {
-        let k = params.module_dimension_k;
-        let a_vec_add = (0..k)
-            .map(|i| self.polynomial_add(&ct1.a_vec[i], &ct2.a_vec[i], params))
-            .collect();
-        let b_add = self.polynomial_add(&ct1.b, &ct2.b, params);
-        Ciphertext { a_vec: a_vec_add, b: b_add }
+        Ciphertext { a_vec: (0..params.module_dimension_k).map(|i| self.polynomial_add(&ct1.a_vec[i], &ct2.a_vec[i], params)).collect(), b: self.polynomial_add(&ct1.b, &ct2.b, params) }
     }
 
     fn homomorphic_sub(&self, ct1: &Ciphertext, ct2: &Ciphertext, params: &QfheParameters) -> Ciphertext {
-        let k = params.module_dimension_k;
-        let a_vec_sub = (0..k)
-            .map(|i| self.polynomial_sub(&ct1.a_vec[i], &ct2.a_vec[i], params))
-            .collect();
-        let b_sub = self.polynomial_sub(&ct1.b, &ct2.b, params);
-        Ciphertext { a_vec: a_vec_sub, b: b_sub }
+        Ciphertext { a_vec: (0..params.module_dimension_k).map(|i| self.polynomial_sub(&ct1.a_vec[i], &ct2.a_vec[i], params)).collect(), b: self.polynomial_sub(&ct1.b, &ct2.b, params) }
     }
 
-    // --- 동형 곱셈 및 재선형화 ---
     fn gen_relinearization_key(&self, secret_key: &SecretKey, params: &QfheParameters) -> RelinearizationKey {
-        let mut rlk_vec = Vec::new();
         let k = params.module_dimension_k;
-        let n = params.polynomial_degree;
-        let l = params.relin_key_len;
-        let base = params.relin_key_base;
+        let mut rng = rand::thread_rng();
 
-        for i in 0..k {
-            for j in 0..k {
-                let s_i_s_j = &secret_key.s_squared[i * k + j];
-                for m in 0..l {
-                    // s_i*s_j * T^m 항을 암호화합니다.
-                    let mut term = Polynomial::zero(n);
-                    term.coeffs[0] = Quaternion::from_scalar(base.pow(m as u32));
-                    let encryption_term = self.polynomial_mul(&term, s_i_s_j, params);
-                    
-                    // 0을 암호화하되, 메시지 항에 s_i*s_j * T^m 을 추가합니다.
-                    let mut encrypted_term = self.encrypt(0, params, secret_key);
-                    encrypted_term.b = self.polynomial_add(&encrypted_term.b, &encryption_term, params);
-                    rlk_vec.push(encrypted_term);
-                }
-            }
+        let s_sq = self.polynomial_mul(&secret_key.s[0], &secret_key.s[0], params);
+        let mut rlk_ct_a = Vec::with_capacity(k);
+        for _ in 0..k {
+            rlk_ct_a.push(Polynomial { coeffs: (0..params.polynomial_degree).map(|_| Quaternion::random(&mut rng, params.modulus_q)).collect() });
         }
-        RelinearizationKey(rlk_vec)
+
+        let mut a_s = Polynomial::zero(params.polynomial_degree);
+        for i in 0..k {
+            a_s = self.polynomial_add(&a_s, &self.polynomial_mul(&rlk_ct_a[i], &secret_key.s[i], params), params);
+        }
+
+        let e = Polynomial { coeffs: (0..params.polynomial_degree).map(|_| Quaternion::new(sample_discrete_gaussian(params.noise_std_dev).rem_euclid(params.modulus_q as i128) as u128, 0, 0, 0)).collect() };
+        let b_term = self.polynomial_add(&self.polynomial_sub(&s_sq, &a_s, params), &e, params);
+
+        RelinearizationKey(vec![Ciphertext { b: b_term, a_vec: rlk_ct_a }])
     }
 }

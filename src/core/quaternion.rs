@@ -1,5 +1,9 @@
 use std::ops::{Add, Sub, Mul};
 
+use num_complex::Complex;
+
+use rand::Rng;
+
 // QFHE의 기본 연산을 위한 4원수(Quaternion)를 정의합니다.
 // SIMD 연산에 최적화될 수 있는 구조입니다. [8, 9]
 #[derive(Clone, Debug, Copy, Default)]
@@ -24,6 +28,25 @@ impl Quaternion {
     // u128 스칼라 값으로부터 4원수를 생성합니다.
     pub fn from_scalar(s: u128) -> Self {
         Quaternion { w: s, x: 0, y: 0, z: 0 }
+    }
+
+    pub fn random(rng: &mut impl Rng, modulus: u128) -> Self {
+        Self {
+            w: rng.random_range(0..modulus),
+            x: rng.random_range(0..modulus),
+            y: rng.random_range(0..modulus),
+            z: rng.random_range(0..modulus),
+        }
+    }
+
+    /// 4원수를 두 개의 복소수로 분해: q = c1 + c2*j
+    pub fn to_complex_pair(&self) -> (Complex<u128>, Complex<u128>) {
+        (Complex::new(self.w, self.x), Complex::new(self.y, self.z))
+    }
+
+    /// 두 개의 복소수로부터 4원수를 재구성
+    pub fn from_complex_pair(c1: &Complex<u128>, c2: &Complex<u128>) -> Self {
+        Self::new(c1.re, c1.im, c2.re, c2.im)
     }
 
     pub fn add(self, other: Self) -> Self {
