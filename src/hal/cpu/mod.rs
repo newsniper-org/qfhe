@@ -203,7 +203,7 @@ impl HardwareBackend for CpuBackend {
         };
         
         let c0 = scale_and_round(&self.polynomial_mul(&ct1.b, &ct2.b, params));
-        let mut c1 = (0..k).map(|i| {
+        let c1 = (0..k).map(|i| {
             scale_and_round(&self.polynomial_add(&self.polynomial_mul(&ct1.a_vec[i], &ct2.b, params), &self.polynomial_mul(&ct2.a_vec[i], &ct1.b, params), params))
         }).collect::<Vec<_>>();
         let mut c2 = vec![vec![Polynomial::zero(n); k]; k];
