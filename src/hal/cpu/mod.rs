@@ -150,87 +150,48 @@ impl HardwareBackend for CpuBackend {
         Polynomial { coeffs: result_coeffs }
     }
 
-    // --- 다항식 연산 (카라츠바 알고리즘 오버플로우 수정) ---
+    // --- 다항식 곱셈 (안정적인 교과서 방식으로 교체 및 오류 수정) ---
     fn polynomial_mul(&self, p1: &Polynomial, p2: &Polynomial, params: &QfheParameters) -> Polynomial {
         let n = params.polynomial_degree;
         let q = params.modulus_q;
+        let mut full_prod_coeffs = vec![Quaternion::zero(); 2 * n - 1];
 
-        // 재귀 호출의 기본 단계: 특정 크기(32) 이하에서는 교과서적 곱셈 사용
-        if n <= 32 {
-            let mut result_coeffs = vec![Quaternion::zero(); n];
+        // 1. 일반 다항식 곱셈 수행 (결과는 2n-2차)
+        for i in 0..n {
+            for j in 0..n {
+                let q1 = p1.coeffs[i];
+                let q2 = p2.coeffs[j];
 
-            for i in 0..n {
-                for j in 0..n {
-                    let q1_c = p1.coeffs[i];
-                    let q2_c = p2.coeffs[j];
+                // 4원수 곱셈 (모든 연산은 모듈러 함수로만 수행)
+                let w = sub_mod(sub_mod(sub_mod(mul_mod(q1.w, q2.w, q), mul_mod(q1.x, q2.x, q), q), mul_mod(q1.y, q2.y, q), q), mul_mod(q1.z, q2.z, q), q);
+                let x = add_mod(add_mod(add_mod(mul_mod(q1.w, q2.x, q), mul_mod(q1.x, q2.w, q), q), mul_mod(q1.y, q2.z, q), q), sub_mod(0, mul_mod(q1.z, q2.y, q), q), q);
+                let y = add_mod(add_mod(sub_mod(mul_mod(q1.w, q2.y, q), mul_mod(q1.x, q2.z, q), q), mul_mod(q1.y, q2.w, q), q), mul_mod(q1.z, q2.x, q), q);
+                let z = add_mod(add_mod(add_mod(mul_mod(q1.w, q2.z, q), mul_mod(q1.x, q2.y, q), q), sub_mod(0, mul_mod(q1.y, q2.x, q), q), q), mul_mod(q1.z, q2.w, q), q);
+                let product = Quaternion { w, x, y, z };
 
-                    // 4원수 곱셈 (모듈러 연산)
-                    let w = sub_mod(sub_mod(sub_mod(mul_mod(q1_c.w, q2_c.w, q), mul_mod(q1_c.x, q2_c.x, q),q), mul_mod(q1_c.y, q2_c.y, q),q), mul_mod(q1_c.z, q2_c.z, q),q);
-                    let x = add_mod(add_mod(add_mod(mul_mod(q1_c.w, q2_c.x, q), mul_mod(q1_c.x, q2_c.w, q), q), mul_mod(q1_c.y, q2_c.z, q), q), sub_mod(0, mul_mod(q1_c.z, q2_c.y, q),q), q);
-                    let y = add_mod(add_mod(sub_mod(mul_mod(q1_c.w, q2_c.y, q), mul_mod(q1_c.x, q2_c.z, q),q), mul_mod(q1_c.y, q2_c.w, q), q), mul_mod(q1_c.z, q2_c.x, q), q);
-                    let z = add_mod(add_mod(add_mod(mul_mod(q1_c.w, q2_c.z, q), mul_mod(q1_c.x, q2_c.y, q), q), sub_mod(0, mul_mod(q1_c.y, q2_c.x, q),q), q), mul_mod(q1_c.z, q2_c.w, q), q);
-                    let product = Quaternion { w, x, y, z };
-                    
-                    // 순환 구조 처리 (모듈러 연산)
-                    let target_index = i + j;
-                    if target_index < n {
-                        result_coeffs[target_index].w = add_mod(result_coeffs[target_index].w, product.w, q);
-                        result_coeffs[target_index].x = add_mod(result_coeffs[target_index].x, product.x, q);
-                        result_coeffs[target_index].y = add_mod(result_coeffs[target_index].y, product.y, q);
-                        result_coeffs[target_index].z = add_mod(result_coeffs[target_index].z, product.z, q);
-                    } else {
-                        result_coeffs[target_index - n].w = sub_mod(result_coeffs[target_index - n].w, product.w,q);
-                        result_coeffs[target_index - n].x = sub_mod(result_coeffs[target_index - n].x, product.x,q);
-                        result_coeffs[target_index - n].y = sub_mod(result_coeffs[target_index - n].y, product.y,q);
-                        result_coeffs[target_index - n].z = sub_mod(result_coeffs[target_index - n].z, product.z,q);
-                    }
-                }
+                full_prod_coeffs[i + j].w = add_mod(full_prod_coeffs[i + j].w, product.w, q);
+                full_prod_coeffs[i + j].x = add_mod(full_prod_coeffs[i + j].x, product.x, q);
+                full_prod_coeffs[i + j].y = add_mod(full_prod_coeffs[i + j].y, product.y, q);
+                full_prod_coeffs[i + j].z = add_mod(full_prod_coeffs[i + j].z, product.z, q);
             }
-            return Polynomial { coeffs: result_coeffs };
         }
-
-        // 1. 다항식 분할
-        let m = n / 2;
-        let p1_low = Polynomial { coeffs: p1.coeffs[0..m].to_vec() };
-        let p1_high = Polynomial { coeffs: p1.coeffs[m..n].to_vec() };
-        let p2_low = Polynomial { coeffs: p2.coeffs[0..m].to_vec() };
-        let p2_high = Polynomial { coeffs: p2.coeffs[m..n].to_vec() };
         
-        let mut sub_params = params.clone();
-        sub_params.polynomial_degree = m;
-
-        // 2. 재귀 호출 (3번의 곱셈)
-        let z2 = self.polynomial_mul(&p1_high, &p2_high, &sub_params);
-        let z0 = self.polynomial_mul(&p1_low, &p2_low, &sub_params);
-        
-        let p1_sum = self.polynomial_add(&p1_low, &p1_high, &sub_params);
-        let p2_sum = self.polynomial_add(&p2_low, &p2_high, &sub_params);
-        let z1_intermediate = self.polynomial_mul(&p1_sum, &p2_sum, &sub_params);
-        let z1 = self.polynomial_sub(&self.polynomial_sub(&z1_intermediate, &z2, &sub_params), &z0, &sub_params);
-
-        // 3. 결과 조합 (모든 과정을 모듈러 연산 함수로만 처리)
-        // Result = z2 * x^n + z1 * x^m + z0
-        let mut result_poly = Polynomial::zero(n);
-        
-        // z0 부분 더하기
-        for i in 0..m { result_poly.coeffs[i] = z0.coeffs[i]; }
-        
-        // z1 부분 더하기
-        for i in 0..m {
-            result_poly.coeffs[i+m] = self.polynomial_add(&Polynomial{coeffs: vec![result_poly.coeffs[i+m]]}, &Polynomial{coeffs: vec![z1.coeffs[i]]}, params).coeffs[0];
+        // 2. 순환 구조(x^n = -1)를 적용하여 n차 다항식으로 축소
+        let mut final_coeffs = vec![Quaternion::zero(); n];
+        for i in 0..n {
+            final_coeffs[i] = full_prod_coeffs[i];
         }
-
-        // z2 부분 더하기
-        for i in 0..m {
-            // (z2 * x^n)은 x^n = -1 이므로, (-z2)를 더하는 것과 같음
-            // 따라서 z2_shifted[i] = -z2.coeffs[i]가 됨
-            let z2_term = self.polynomial_sub(&Polynomial::zero(1), &Polynomial{coeffs: vec![z2.coeffs[i]]}, params).coeffs[0];
-            result_poly.coeffs[i] = self.polynomial_add(&Polynomial{coeffs: vec![result_poly.coeffs[i]]}, &Polynomial{coeffs: vec![z2_term]}, params).coeffs[0];
+        for i in 0..(n - 1) {
+            final_coeffs[i].w = sub_mod(final_coeffs[i].w, full_prod_coeffs[i + n].w, q);
+            final_coeffs[i].x = sub_mod(final_coeffs[i].x, full_prod_coeffs[i + n].x, q);
+            final_coeffs[i].y = sub_mod(final_coeffs[i].y, full_prod_coeffs[i + n].y, q);
+            final_coeffs[i].z = sub_mod(final_coeffs[i].z, full_prod_coeffs[i + n].z, q);
         }
-
-        result_poly
+        
+        Polynomial { coeffs: final_coeffs }
     }
 
+    // --- 동형 곱셈 (재선형화 -> 리스케일링 순서 및 로직 수정) ---
     fn homomorphic_mul(&self, ct1: &Ciphertext, ct2: &Ciphertext, rlk: &RelinearizationKey, params: &QfheParameters) -> Ciphertext {
         let k = params.module_dimension_k;
         let n = params.polynomial_degree;
@@ -250,7 +211,7 @@ impl HardwareBackend for CpuBackend {
             (0..k).map(move |j| self.polynomial_mul(&ct1.a_vec[i], &ct2.a_vec[j], params))
         }).collect();
 
-        // Step 2: 재선형화 (Relinearization) - 리스케일링 전에 수행!
+        // Step 2: 재선형화 (Relinearization)
         let d2_decomposed: Vec<Vec<Polynomial>> = d2_prime.iter().map(|p| p.decompose(params.relin_key_base, params.relin_key_len, params)).collect();
         
         let mut relin_b_part = Polynomial::zero(n);
@@ -277,16 +238,14 @@ impl HardwareBackend for CpuBackend {
             final_a_unscaled[i] = self.polynomial_add(&d1_prime[i], &relin_a_part[i], params);
         }
         
-        // Step 3: 리스케일링 (Rescaling) - 모든 연산이 끝난 후 마지막에 수행!
+        // Step 3: 리스케일링 (Rescaling)
         let rescale = |p: &Polynomial| -> Polynomial {
             let delta_half = delta / 2;
             Polynomial {
                 coeffs: p.coeffs.iter().map(|c| {
                     Quaternion::new(
-                        (c.w + delta_half) / delta,
-                        (c.x + delta_half) / delta,
-                        (c.y + delta_half) / delta,
-                        (c.z + delta_half) / delta
+                        (c.w + delta_half) / delta, (c.x + delta_half) / delta,
+                        (c.y + delta_half) / delta, (c.z + delta_half) / delta
                     )
                 }).collect()
             }
@@ -316,28 +275,61 @@ impl HardwareBackend for CpuBackend {
         Ciphertext { a_vec: a_vec_sub, b: b_sub }
     }
 
-    // --- 동형 곱셈 및 재선형화 ---
+    // --- 재선형화 키 생성 (Delta 스케일링 오류 수정) ---
     fn gen_relinearization_key(&self, secret_key: &SecretKey, params: &QfheParameters) -> RelinearizationKey {
-        let mut rlk_vec = Vec::new();
+        let mut rng = rand::rng();
         let k = params.module_dimension_k;
         let n = params.polynomial_degree;
         let l = params.relin_key_len;
         let base = params.relin_key_base;
+        let q = params.modulus_q;
+        let delta = params.scaling_factor_delta;
+        let mut rlk_vec = Vec::new();
 
-        for i in 0..k {
-            for j in 0..k {
-                let s_i_s_j = &secret_key.s_squared[i * k + j];
-                for m in 0..l {
-                    // s_i*s_j * T^m 항을 암호화합니다.
-                    let mut term = Polynomial::zero(n);
-                    term.coeffs[0] = Quaternion::from_scalar(base.pow(m as u32));
-                    let encryption_term = self.polynomial_mul(&term, s_i_s_j, params);
-                    
-                    // 0을 암호화하되, 메시지 항에 s_i*s_j * T^m 을 추가합니다.
-                    let mut encrypted_term = self.encrypt(0, params, secret_key);
-                    encrypted_term.b = self.polynomial_add(&encrypted_term.b, &encryption_term, params);
-                    rlk_vec.push(encrypted_term);
+        for i in 0..(k * k) {
+            for j in 0..l {
+                // 암호화할 메시지: base^j * s_i * s_j
+                let mut message_poly = secret_key.s_squared[i].clone();
+                let scale_factor = base.pow(j as u32);
+                for coeff in &mut message_poly.coeffs {
+                    coeff.w = mul_mod(coeff.w, scale_factor, q);
+                    coeff.x = mul_mod(coeff.x, scale_factor, q);
+                    coeff.y = mul_mod(coeff.y, scale_factor, q);
+                    coeff.z = mul_mod(coeff.z, scale_factor, q);
                 }
+
+                // 표준 암호화 절차 시작
+                let a_vec = (0..k).map(|_| {
+                    Polynomial { coeffs: (0..n).map(|_| Quaternion::random(&mut rng, q)).collect() }
+                }).collect::<Vec<_>>();
+
+                let e = Polynomial { 
+                    coeffs: (0..n).map(|_| Quaternion {
+                        w: sample_discrete_gaussian(params.noise_std_dev).rem_euclid(q as i128) as u128,
+                        x: sample_discrete_gaussian(params.noise_std_dev).rem_euclid(q as i128) as u128,
+                        y: sample_discrete_gaussian(params.noise_std_dev).rem_euclid(q as i128) as u128,
+                        z: sample_discrete_gaussian(params.noise_std_dev).rem_euclid(q as i128) as u128,
+                    }).collect() 
+                };
+                
+                let mut as_poly = Polynomial::zero(n);
+                for m in 0..k {
+                    let product = self.polynomial_mul(&a_vec[m], &secret_key.s[m], params);
+                    as_poly = self.polynomial_add(&as_poly, &product, params);
+                }
+
+                // b = a*s + e + delta * m
+                let mut scaled_message = message_poly;
+                for coeff in &mut scaled_message.coeffs {
+                    coeff.w = mul_mod(coeff.w, delta, q);
+                    coeff.x = mul_mod(coeff.x, delta, q);
+                    coeff.y = mul_mod(coeff.y, delta, q);
+                    coeff.z = mul_mod(coeff.z, delta, q);
+                }
+                
+                let b = self.polynomial_add(&self.polynomial_add(&as_poly, &e, params), &scaled_message, params);
+                
+                rlk_vec.push(Ciphertext { b, a_vec });
             }
         }
         RelinearizationKey(rlk_vec)
