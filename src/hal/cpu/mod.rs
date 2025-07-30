@@ -66,41 +66,58 @@ fn mul_mod(mut a: u128, mut b: u128, m: u128) -> u128 {
 
 impl HardwareBackend for CpuBackend {
     fn encrypt(&self, message: u64, params: &QfheParameters, secret_key: &SecretKey) -> Ciphertext {
-        let mut rng = rand::rng();
-        let a_coeffs = (0..params.polynomial_degree).map(|_| Quaternion {
-            w: rng.random_range(0..params.modulus_q), x: rng.random_range(0..params.modulus_q),
-            y: rng.random_range(0..params.modulus_q), z: rng.random_range(0..params.modulus_q),
-        }).collect();
-        let a_poly = Polynomial { coeffs: a_coeffs };
+        let mut rng = rand::thread_rng();
+        let k = params.module_dimension_k;
 
+        // 1. a_vec: k개의 무작위 다항식 벡터 생성
+        let a_vec = (0..k).map(|_| {
+            let coeffs = (0..params.polynomial_degree).map(|_| Quaternion {
+                w: rng.random_range(0..params.modulus_q), x: 0, y: 0, z: 0,
+            }).collect();
+            Polynomial { coeffs }
+        }).collect::<Vec<_>>();
+
+        // 2. e: 작은 오차 다항식 생성
         let e_coeffs = (0..params.polynomial_degree).map(|_| Quaternion {
             w: sample_discrete_gaussian(params.noise_std_dev).rem_euclid(params.modulus_q as i128) as u128,
-            x: sample_discrete_gaussian(params.noise_std_dev).rem_euclid(params.modulus_q as i128) as u128,
-            y: sample_discrete_gaussian(params.noise_std_dev).rem_euclid(params.modulus_q as i128) as u128,
-            z: sample_discrete_gaussian(params.noise_std_dev).rem_euclid(params.modulus_q as i128) as u128,
+            x: 0, y: 0, z: 0,
         }).collect();
         let e_poly = Polynomial { coeffs: e_coeffs };
         
+        // 3. m: 메시지 인코딩
         let mut scaled_m_coeffs = vec![Quaternion::zero(); params.polynomial_degree];
         let plaintext_mask = params.plaintext_modulus - 1;
         scaled_m_coeffs[0] = Quaternion::from_scalar(((message as u128) & plaintext_mask) * params.scaling_factor_delta);
         let scaled_m_poly = Polynomial { coeffs: scaled_m_coeffs };
 
-        let as_poly = self.polynomial_mul(&a_poly, &secret_key.0, params);
+        // 4. b = <a, s> + e + m 계산
+        let mut as_poly = Polynomial::zero(params.polynomial_degree);
+        for i in 0..k {
+            let product = self.polynomial_mul(&a_vec[i], &secret_key.0[i], params);
+            as_poly = self.polynomial_add(&as_poly, &product, params);
+        }
+        
         let b_poly = self.polynomial_add(&as_poly, &e_poly, params);
         let b_poly = self.polynomial_add(&b_poly, &scaled_m_poly, params);
 
-        Ciphertext { polynomials: vec![a_poly, b_poly] }
+        Ciphertext { a_vec, b: b_poly }
     }
 
     fn decrypt(&self, ciphertext: &Ciphertext, params: &QfheParameters, secret_key: &SecretKey) -> u64 {
-        if ciphertext.polynomials.len() < 2 { return 0; }
-        let a_poly = &ciphertext.polynomials[0];
-        let b_poly = &ciphertext.polynomials[1];
-        let as_poly = self.polynomial_mul(a_poly, &secret_key.0, params);
-        let m_prime_poly = self.polynomial_sub(b_poly, &as_poly, params);
+        let k = params.module_dimension_k;
+        
+        // 1. <a, s> 계산
+        let mut as_poly = Polynomial::zero(params.polynomial_degree);
+        for i in 0..k {
+            let product = self.polynomial_mul(&ciphertext.a_vec[i], &secret_key.0[i], params);
+            as_poly = self.polynomial_add(&as_poly, &product, params);
+        }
+
+        // 2. m' = b - <a, s>
+        let m_prime_poly = self.polynomial_sub(&ciphertext.b, &as_poly, params);
         let noisy_message = m_prime_poly.coeffs[0].w;
 
+        // 3. 디코딩
         let half_delta = params.scaling_factor_delta / 2;
         let rounded_val = add_mod(noisy_message, half_delta, params.modulus_q);
         (rounded_val / params.scaling_factor_delta) as u64
@@ -149,20 +166,20 @@ impl HardwareBackend for CpuBackend {
     }
     
     fn homomorphic_add(&self, ct1: &Ciphertext, ct2: &Ciphertext, params: &QfheParameters) -> Ciphertext {
-        if ct1.polynomials.len() < 2 || ct2.polynomials.len() < 2 { panic!("Invalid ciphertext"); }
-        let a1 = &ct1.polynomials[0]; let b1 = &ct1.polynomials[1];
-        let a2 = &ct2.polynomials[0]; let b2 = &ct2.polynomials[1];
-        let a_add = self.polynomial_add(a1, a2, params);
-        let b_add = self.polynomial_add(b1, b2, params);
-        Ciphertext { polynomials: vec![a_add, b_add] }
+        let k = params.module_dimension_k;
+        let a_vec_add = (0..k)
+            .map(|i| self.polynomial_add(&ct1.a_vec[i], &ct2.a_vec[i], params))
+            .collect();
+        let b_add = self.polynomial_add(&ct1.b, &ct2.b, params);
+        Ciphertext { a_vec: a_vec_add, b: b_add }
     }
 
     fn homomorphic_sub(&self, ct1: &Ciphertext, ct2: &Ciphertext, params: &QfheParameters) -> Ciphertext {
-        if ct1.polynomials.len() < 2 || ct2.polynomials.len() < 2 { panic!("Invalid ciphertext"); }
-        let a1 = &ct1.polynomials[0]; let b1 = &ct1.polynomials[1];
-        let a2 = &ct2.polynomials[0]; let b2 = &ct2.polynomials[1];
-        let a_sub = self.polynomial_sub(a1, a2, params);
-        let b_sub = self.polynomial_sub(b1, b2, params);
-        Ciphertext { polynomials: vec![a_sub, b_sub] }
+        let k = params.module_dimension_k;
+        let a_vec_sub = (0..k)
+            .map(|i| self.polynomial_sub(&ct1.a_vec[i], &ct2.a_vec[i], params))
+            .collect();
+        let b_sub = self.polynomial_sub(&ct1.b, &ct2.b, params);
+        Ciphertext { a_vec: a_vec_sub, b: b_sub }
     }
 }

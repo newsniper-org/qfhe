@@ -4,8 +4,7 @@ use crate::core::{
 use crate::hal::{CpuBackend, HardwareBackend};
 use rand::Rng;
 
-// CPU 백엔드를 사용하는 QFHE 컨텍스트 구조체
-// QFHE 컨텍스트 구조체: 이제 암호 파라미터와 키를 포함합니다.
+#[repr(C)]
 pub struct QfheContext {
     backend: Box<dyn HardwareBackend>,
     secret_key: SecretKey,
@@ -30,21 +29,26 @@ impl QfheEngine for QfheContext {
     }
 }
 
-/// C에서 사용할 컨텍스트 생성 함수
 #[unsafe(no_mangle)]
-pub extern "C" fn qfhe_context_create(level: SecurityLevel) -> *mut QfheContext {
+pub unsafe extern "C" fn qfhe_context_create(level: SecurityLevel) -> *mut QfheContext {
     let params = level.get_params();
-    let mut rng = rand::rng();
-    let secret_key_coeffs = (0..params.polynomial_degree).map(|_| {
-        let val: i128 = rng.random_range(-1..=1);
-        Quaternion {
-            w: val.rem_euclid(params.modulus_q as i128) as u128,
-            x: val.rem_euclid(params.modulus_q as i128) as u128,
-            y: val.rem_euclid(params.modulus_q as i128) as u128,
-            z: val.rem_euclid(params.modulus_q as i128) as u128,
-        }
+    let mut rng = rand::thread_rng();
+    
+    // MLWE 비밀키는 k개의 다항식 벡터입니다.
+    let secret_key_vec = (0..params.module_dimension_k).map(|_| {
+        let coeffs = (0..params.polynomial_degree).map(|_| {
+            let val: i128 = rng.random_range(-1..=1);
+            Quaternion {
+                w: val.rem_euclid(params.modulus_q as i128) as u128,
+                x: val.rem_euclid(params.modulus_q as i128) as u128,
+                y: val.rem_euclid(params.modulus_q as i128) as u128,
+                z: val.rem_euclid(params.modulus_q as i128) as u128,
+            }
+        }).collect();
+        Polynomial { coeffs }
     }).collect();
-    let secret_key = SecretKey(Polynomial { coeffs: secret_key_coeffs });
+
+    let secret_key = SecretKey(secret_key_vec);
     
     let context = Box::new(QfheContext { 
         backend: Box::new(CpuBackend),
@@ -54,34 +58,29 @@ pub extern "C" fn qfhe_context_create(level: SecurityLevel) -> *mut QfheContext 
     Box::into_raw(context)
 }
 
-/// C에서 컨텍스트를 안전하게 해제하는 함수
 #[unsafe(no_mangle)]
-pub extern "C" fn qfhe_context_destroy(context_ptr: *mut QfheContext) {
+pub unsafe extern "C" fn qfhe_context_destroy(context_ptr: *mut QfheContext) {
     if !context_ptr.is_null() {
         drop(unsafe { Box::from_raw(context_ptr) });
     }
 }
 
-
-/// 메시지를 암호화하는 FFI 함수
 #[unsafe(no_mangle)]
-pub extern "C" fn qfhe_encrypt(context_ptr: *mut QfheContext, message: u64) -> *mut Ciphertext {
+pub unsafe extern "C" fn qfhe_encrypt(context_ptr: *mut QfheContext, message: u64) -> *mut Ciphertext {
     let context = unsafe { &*context_ptr };
     let ciphertext = Box::new(context.encrypt(message));
     Box::into_raw(ciphertext)
 }
 
-/// 암호문을 복호화하는 FFI 함수
 #[unsafe(no_mangle)]
-pub extern "C" fn qfhe_decrypt(context_ptr: *mut QfheContext, ciphertext_ptr: *mut Ciphertext) -> u64 {
+pub unsafe extern "C" fn qfhe_decrypt(context_ptr: *mut QfheContext, ciphertext_ptr: *mut Ciphertext) -> u64 {
     let context = unsafe { &*context_ptr };
     let ciphertext = unsafe { &*ciphertext_ptr };
     context.decrypt(ciphertext)
 }
 
-/// 동형적으로 두 암호문을 더합니다.
 #[unsafe(no_mangle)]
-pub extern "C" fn qfhe_homomorphic_add(
+pub unsafe extern "C" fn qfhe_homomorphic_add(
     context_ptr: *mut QfheContext,
     ct1_ptr: *mut Ciphertext,
     ct2_ptr: *mut Ciphertext,
@@ -94,7 +93,7 @@ pub extern "C" fn qfhe_homomorphic_add(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn qfhe_homomorphic_sub(
+pub unsafe extern "C" fn qfhe_homomorphic_sub(
     context_ptr: *mut QfheContext,
     ct1_ptr: *mut Ciphertext,
     ct2_ptr: *mut Ciphertext,
@@ -106,9 +105,8 @@ pub extern "C" fn qfhe_homomorphic_sub(
     Box::into_raw(result_ct)
 }
 
-/// 암호문을 안전하게 해제하는 함수
 #[unsafe(no_mangle)]
-pub extern "C" fn qfhe_ciphertext_destroy(ciphertext_ptr: *mut Ciphertext) {
+pub unsafe extern "C" fn qfhe_ciphertext_destroy(ciphertext_ptr: *mut Ciphertext) {
     if !ciphertext_ptr.is_null() {
         drop(unsafe { Box::from_raw(ciphertext_ptr) });
     }

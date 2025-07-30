@@ -29,29 +29,14 @@ typedef struct Ciphertext Ciphertext;
 
 typedef struct QfheContext QfheContext;
 
-/**
- * C에서 사용할 컨텍스트 생성 함수
- */
 QfheContext *qfhe_context_create(SecurityLevel level);
 
-/**
- * C에서 컨텍스트를 안전하게 해제하는 함수
- */
 void qfhe_context_destroy(QfheContext *context_ptr);
 
-/**
- * 메시지를 암호화하는 FFI 함수
- */
 Ciphertext *qfhe_encrypt(QfheContext *context_ptr, uint64_t message);
 
-/**
- * 암호문을 복호화하는 FFI 함수
- */
 uint64_t qfhe_decrypt(QfheContext *context_ptr, Ciphertext *ciphertext_ptr);
 
-/**
- * 동형적으로 두 암호문을 더합니다.
- */
 Ciphertext *qfhe_homomorphic_add(QfheContext *context_ptr,
                                  Ciphertext *ct1_ptr,
                                  Ciphertext *ct2_ptr);
@@ -60,9 +45,6 @@ Ciphertext *qfhe_homomorphic_sub(QfheContext *context_ptr,
                                  Ciphertext *ct1_ptr,
                                  Ciphertext *ct2_ptr);
 
-/**
- * 암호문을 안전하게 해제하는 함수
- */
 void qfhe_ciphertext_destroy(Ciphertext *ciphertext_ptr);
 
 #endif  /* QFHE_H */
