@@ -32,7 +32,7 @@ impl QfheEngine for QfheContext {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qfhe_context_create(level: SecurityLevel) -> *mut QfheContext {
     let params = level.get_params();
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     
     // MLWE 비밀키는 k개의 다항식 벡터입니다.
     let secret_key_vec = (0..params.module_dimension_k).map(|_| {

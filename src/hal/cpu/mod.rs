@@ -66,7 +66,7 @@ fn mul_mod(mut a: u128, mut b: u128, m: u128) -> u128 {
 
 impl HardwareBackend for CpuBackend {
     fn encrypt(&self, message: u64, params: &QfheParameters, secret_key: &SecretKey) -> Ciphertext {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let k = params.module_dimension_k;
 
         // 1. a_vec: k개의 무작위 다항식 벡터 생성
