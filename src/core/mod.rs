@@ -22,7 +22,9 @@ pub struct QfheParameters {
     pub plaintext_modulus: u128,
     pub scaling_factor_delta: u128,
     pub noise_std_dev: f64,
-    pub module_dimension_k: usize
+    pub module_dimension_k: usize,
+    pub relin_key_base: u128, // 재선형화 키를 위한 분해 기준
+    pub relin_key_len: usize,   // 재선형화 키의 길이
 }
 
 impl SecurityLevel {
@@ -38,6 +40,8 @@ impl SecurityLevel {
                 plaintext_modulus: 1 << 32,
                 scaling_factor_delta: 1152921504606846883 / (1 << 32),
                 noise_std_dev: 3.2,
+                relin_key_base: 1 << 30, // T = 2^30
+                relin_key_len: 2,      // l = ceil(60 / 30) = 2
             },
             // ~160-bit quantum security (Intermediate)
             SecurityLevel::L160 => QfheParameters {
@@ -47,6 +51,8 @@ impl SecurityLevel {
                 plaintext_modulus: 1 << 32,
                 scaling_factor_delta: 1180591620717411303423 / (1 << 32),
                 noise_std_dev: 3.2,
+                relin_key_base: 1 << 35, // T = 2^35
+                relin_key_len: 2,      // l = ceil(70 / 35) = 2
             },
             // 192-bit quantum security (NIST Level 3)
             SecurityLevel::L192 => QfheParameters {
@@ -56,6 +62,8 @@ impl SecurityLevel {
                 plaintext_modulus: 1 << 32,
                 scaling_factor_delta: 1180591620717411303423 / (1 << 32),
                 noise_std_dev: 3.2,
+                relin_key_base: 1 << 35, // T = 2^35
+                relin_key_len: 2,      // l = ceil(70 / 35) = 2
             },
             // ~224-bit quantum security (Intermediate)
             SecurityLevel::L224 => QfheParameters {
@@ -65,6 +73,8 @@ impl SecurityLevel {
                 plaintext_modulus: 1 << 64,
                 scaling_factor_delta: 340282366920938463463374607431768211293 / (1 << 64),
                 noise_std_dev: 3.2,
+                relin_key_base: 1 << 63, // T = 2^63
+                relin_key_len: 2,      // l = ceil(125 / 63) = 2
             },
             // 256-bit quantum security (NIST Level 5)
             SecurityLevel::L256 => QfheParameters {
@@ -74,6 +84,8 @@ impl SecurityLevel {
                 plaintext_modulus: 1 << 64,
                 scaling_factor_delta: 340282366920938463463374607431768211293 / (1 << 64),
                 noise_std_dev: 3.2,
+                relin_key_base: 1 << 63, // T = 2^63
+                relin_key_len: 2,      // l = ceil(125 / 63) = 2
             },
         }
     }
@@ -81,8 +93,15 @@ impl SecurityLevel {
 
 
 
-/// 비밀키는 4원수들의 벡터입니다.
-pub struct SecretKey(pub Vec<Polynomial>);
+/// 비밀키는 s와 s^2을 모두 포함합니다.
+pub struct SecretKey {
+    pub s: Vec<Polynomial>,
+    pub s_squared: Vec<Polynomial>, // For MLWE, s^2 becomes a matrix of polynomials
+}
+
+/// 재선형화 키는 암호문들의 벡터입니다.
+pub struct RelinearizationKey(pub Vec<Ciphertext>);
+
 
 /// LWE 암호문은 (a, b) 쌍으로 구성됩니다.
 /// a는 4원수들의 벡터이고, b는 단일 4원수입니다.
@@ -98,4 +117,5 @@ pub trait QfheEngine {
     fn decrypt(&self, ciphertext: &Ciphertext) -> u64;
     fn homomorphic_add(&self, ct1: &Ciphertext, ct2: &Ciphertext) -> Ciphertext;
     fn homomorphic_sub(&self, ct1: &Ciphertext, ct2: &Ciphertext) -> Ciphertext;
+    fn homomorphic_mul(&self, ct1: &Ciphertext, ct2: &Ciphertext) -> Ciphertext;
 }

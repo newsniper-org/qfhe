@@ -44,13 +44,36 @@ impl Quaternion {
         }
     }
 
-    pub fn mul(self, other: Self) -> Self {
-        Self {
-            w: (self.w * other.w - self.x * other.x - self.y * other.y - self.z * other.z),
-            x: (self.w * other.x + self.x * other.w + self.y * other.z - self.z * other.y),
-            y: (self.w * other.y - self.x * other.z + self.y * other.w + self.z * other.x),
-            z: (self.w * other.z + self.x * other.y - self.y * other.x + self.z * other.w),
-        }
+    pub fn mul(self, rhs: Self) -> Self {
+        // 임시 변수를 사용하여 wrapping_sub으로 인한 중간값 문제를 방지합니다.
+        let s0 = self.w; let s1 = self.x; let s2 = self.y; let s3 = self.z;
+        let o0 = rhs.w; let o1 = rhs.x; let o2 = rhs.y; let o3 = rhs.z;
+
+        // w = s0*o0 - s1*o1 - s2*o2 - s3*o3
+        let w = s0.wrapping_mul(o0)
+           .wrapping_sub(s1.wrapping_mul(o1))
+           .wrapping_sub(s2.wrapping_mul(o2))
+           .wrapping_sub(s3.wrapping_mul(o3));
+
+        // x = s0*o1 + s1*o0 + s2*o3 - s3*o2
+        let x = s0.wrapping_mul(o1)
+           .wrapping_add(s1.wrapping_mul(o0))
+           .wrapping_add(s2.wrapping_mul(o3))
+           .wrapping_sub(s3.wrapping_mul(o2));
+
+        // y = s0*o2 - s1*o3 + s2*o0 + s3*o1
+        let y = s0.wrapping_mul(o2)
+           .wrapping_sub(s1.wrapping_mul(o3))
+           .wrapping_add(s2.wrapping_mul(o0))
+           .wrapping_add(s3.wrapping_mul(o1));
+
+        // z = s0*o3 + s1*o2 - s2*o1 + s3*o0
+        let z = s0.wrapping_mul(o3)
+           .wrapping_add(s1.wrapping_mul(o2))
+           .wrapping_sub(s2.wrapping_mul(o1))
+           .wrapping_add(s3.wrapping_mul(o0));
+
+        Self { w, x, y, z }
     }
     
     pub fn scale(self, scalar: u128) -> Self {

@@ -1,5 +1,5 @@
 use crate::core::{
-    Ciphertext, QfheEngine, Polynomial, Quaternion, SecretKey, SecurityLevel, QfheParameters
+    Ciphertext, QfheEngine, Polynomial, Quaternion, SecretKey, SecurityLevel, QfheParameters, RelinearizationKey
 };
 use crate::hal::{CpuBackend, HardwareBackend};
 use rand::Rng;
@@ -8,6 +8,7 @@ use rand::Rng;
 pub struct QfheContext {
     backend: Box<dyn HardwareBackend>,
     secret_key: SecretKey,
+    relinearization_key: RelinearizationKey,
     params: QfheParameters,
 }
 
@@ -27,32 +28,40 @@ impl QfheEngine for QfheContext {
     fn homomorphic_sub(&self, ct1: &Ciphertext, ct2: &Ciphertext) -> Ciphertext {
         self.backend.homomorphic_sub(ct1, ct2, &self.params)
     }
+    fn homomorphic_mul(&self, ct1: &Ciphertext, ct2: &Ciphertext) -> Ciphertext {
+        self.backend.homomorphic_mul(ct1, ct2, &self.relinearization_key, &self.params)
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qfhe_context_create(level: SecurityLevel) -> *mut QfheContext {
     let params = level.get_params();
     let mut rng = rand::rng();
+    let k = params.module_dimension_k;
     
-    // MLWE 비밀키는 k개의 다항식 벡터입니다.
-    let secret_key_vec = (0..params.module_dimension_k).map(|_| {
+    let s: Vec<Polynomial> = (0..k).map(|_| {
         let coeffs = (0..params.polynomial_degree).map(|_| {
             let val: i128 = rng.random_range(-1..=1);
-            Quaternion {
-                w: val.rem_euclid(params.modulus_q as i128) as u128,
-                x: val.rem_euclid(params.modulus_q as i128) as u128,
-                y: val.rem_euclid(params.modulus_q as i128) as u128,
-                z: val.rem_euclid(params.modulus_q as i128) as u128,
-            }
+            Quaternion { w: val.rem_euclid(params.modulus_q as i128) as u128, x:0,y:0,z:0 }
         }).collect();
         Polynomial { coeffs }
     }).collect();
 
-    let secret_key = SecretKey(secret_key_vec);
+    let backend = Box::new(CpuBackend);
+
+    let s_squared: Vec<Polynomial> = (0..k*k).map(|idx| {
+        let i = idx / k;
+        let j = idx % k;
+        backend.polynomial_mul(&s[i], &s[j], &params)
+    }).collect();
+
+    let secret_key = SecretKey { s, s_squared };
+    let relinearization_key = backend.gen_relinearization_key(&secret_key, &params);
     
     let context = Box::new(QfheContext { 
-        backend: Box::new(CpuBackend),
+        backend,
         secret_key,
+        relinearization_key,
         params,
     });
     Box::into_raw(context)
@@ -104,6 +113,20 @@ pub unsafe extern "C" fn qfhe_homomorphic_sub(
     let result_ct = Box::new(context.homomorphic_sub(ct1, ct2));
     Box::into_raw(result_ct)
 }
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qfhe_homomorphic_mul(
+    context_ptr: *mut QfheContext,
+    ct1_ptr: *mut Ciphertext,
+    ct2_ptr: *mut Ciphertext,
+) -> *mut Ciphertext {
+    let context = unsafe { &*context_ptr };
+    let ct1 = unsafe { &*ct1_ptr };
+    let ct2 = unsafe { &*ct2_ptr };
+    let result_ct = Box::new(context.homomorphic_mul(ct1, ct2));
+    Box::into_raw(result_ct)
+}
+
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qfhe_ciphertext_destroy(ciphertext_ptr: *mut Ciphertext) {

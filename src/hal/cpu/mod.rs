@@ -1,5 +1,5 @@
 use crate::core::{
-    Ciphertext, Polynomial, Quaternion, SecretKey, QfheParameters
+    Ciphertext, Polynomial, Quaternion, SecretKey, QfheParameters, RelinearizationKey
 };
 use super::HardwareBackend;
 use rand::Rng;
@@ -93,7 +93,7 @@ impl HardwareBackend for CpuBackend {
         // 4. b = <a, s> + e + m 계산
         let mut as_poly = Polynomial::zero(params.polynomial_degree);
         for i in 0..k {
-            let product = self.polynomial_mul(&a_vec[i], &secret_key.0[i], params);
+            let product = self.polynomial_mul(&a_vec[i], &secret_key.s[i], params);
             as_poly = self.polynomial_add(&as_poly, &product, params);
         }
         
@@ -109,7 +109,7 @@ impl HardwareBackend for CpuBackend {
         // 1. <a, s> 계산
         let mut as_poly = Polynomial::zero(params.polynomial_degree);
         for i in 0..k {
-            let product = self.polynomial_mul(&ciphertext.a_vec[i], &secret_key.0[i], params);
+            let product = self.polynomial_mul(&ciphertext.a_vec[i], &secret_key.s[i], params);
             as_poly = self.polynomial_add(&as_poly, &product, params);
         }
 
@@ -153,16 +153,91 @@ impl HardwareBackend for CpuBackend {
     }
 
     fn polynomial_mul(&self, p1: &Polynomial, p2: &Polynomial, params: &QfheParameters) -> Polynomial {
-        let mut result = Polynomial::zero(params.polynomial_degree);
-        for i in 0..params.polynomial_degree {
-            for j in 0..params.polynomial_degree {
-                if p1.coeffs[i].w == 0 { continue; }
-                let index = (i + j) % params.polynomial_degree;
-                let val = mul_mod(p1.coeffs[i].w, p2.coeffs[j].w, params.modulus_q);
-                result.coeffs[index].w = add_mod(result.coeffs[index].w, val, params.modulus_q);
+        let n = params.polynomial_degree;
+        let mut result = Polynomial::zero(n);
+        for i in 0..n {
+            for j in 0..n {
+                let q1 = p1.coeffs[i];
+                let q2 = p2.coeffs[j];
+                
+                // --- 4원수 곱셈 (q1 * q2) 로직 ---
+                let w = mul_mod(q1.w, q2.w, params.modulus_q)
+                    .wrapping_sub(mul_mod(q1.x, q2.x, params.modulus_q))
+                    .wrapping_sub(mul_mod(q1.y, q2.y, params.modulus_q))
+                    .wrapping_sub(mul_mod(q1.z, q2.z, params.modulus_q));
+                let x = mul_mod(q1.w, q2.x, params.modulus_q)
+                    .wrapping_add(mul_mod(q1.x, q2.w, params.modulus_q))
+                    .wrapping_add(mul_mod(q1.y, q2.z, params.modulus_q))
+                    .wrapping_sub(mul_mod(q1.z, q2.y, params.modulus_q));
+                let y = mul_mod(q1.w, q2.y, params.modulus_q)
+                    .wrapping_sub(mul_mod(q1.x, q2.z, params.modulus_q))
+                    .wrapping_add(mul_mod(q1.y, q2.w, params.modulus_q))
+                    .wrapping_add(mul_mod(q1.z, q2.x, params.modulus_q));
+                let z = mul_mod(q1.w, q2.z, params.modulus_q)
+                    .wrapping_add(mul_mod(q1.x, q2.y, params.modulus_q))
+                    .wrapping_sub(mul_mod(q1.y, q2.x, params.modulus_q))
+                    .wrapping_add(mul_mod(q1.z, q2.w, params.modulus_q));
+                
+                let product = Quaternion { w, x, y, z };
+                
+                // 다항식 곱셈의 순환 구조 처리 (X^n = -1)
+                let target_index = i + j;
+                if target_index < n {
+                    result.coeffs[target_index] = result.coeffs[target_index] + product;
+                } else {
+                    result.coeffs[target_index - n] = result.coeffs[target_index - n] - product;
+                }
             }
         }
+        // 계수별 모듈러 연산
+        for i in 0..n {
+            result.coeffs[i].w %= params.modulus_q;
+            result.coeffs[i].x %= params.modulus_q;
+            result.coeffs[i].y %= params.modulus_q;
+            result.coeffs[i].z %= params.modulus_q;
+        }
         result
+    }
+
+    fn homomorphic_mul(&self, ct1: &Ciphertext, ct2: &Ciphertext, rlk: &RelinearizationKey, params: &QfheParameters) -> Ciphertext {
+        let k = params.module_dimension_k;
+        let n = params.polynomial_degree;
+        let l = params.relin_key_len;
+        let base = params.relin_key_base;
+
+        // 1. Tensor Product & Scale
+        let scale = params.scaling_factor_delta;
+        let c0 = self.polynomial_mul(&ct1.b, &ct2.b, params).scale_and_round(scale, params);
+        let mut c1 = (0..k).map(|i| {
+            self.polynomial_add(&self.polynomial_mul(&ct1.a_vec[i], &ct2.b, params), &self.polynomial_mul(&ct2.a_vec[i], &ct1.b, params), params).scale_and_round(scale, params)
+        }).collect::<Vec<_>>();
+        let mut c2 = vec![vec![Polynomial::zero(n); k]; k];
+        for i in 0..k {
+            for j in 0..k {
+                c2[i][j] = self.polynomial_mul(&ct1.a_vec[i], &ct2.a_vec[j], params).scale_and_round(scale, params);
+            }
+        }
+
+        // 2. Relinearization
+        let mut c0_new = c0;
+        let mut c1_new = c1;
+
+        for i in 0..k {
+            for j in 0..k {
+                let c2_decomposed = c2[i][j].decompose(base, l);
+                for m in 0..l {
+                    let rlk_idx = (i * k + j) * l + m;
+                    let rlk_ct = &rlk.0[rlk_idx];
+                    
+                    c0_new = self.polynomial_add(&c0_new, &self.polynomial_mul(&c2_decomposed[m], &rlk_ct.b, params), params);
+                    for r in 0..k {
+                        c1_new[r] = self.polynomial_add(&c1_new[r], &self.polynomial_mul(&c2_decomposed[m], &rlk_ct.a_vec[r], params), params);
+                    }
+                }
+            }
+        }
+        
+        Ciphertext { a_vec: c1_new, b: c0_new }
     }
     
     fn homomorphic_add(&self, ct1: &Ciphertext, ct2: &Ciphertext, params: &QfheParameters) -> Ciphertext {
@@ -181,5 +256,30 @@ impl HardwareBackend for CpuBackend {
             .collect();
         let b_sub = self.polynomial_sub(&ct1.b, &ct2.b, params);
         Ciphertext { a_vec: a_vec_sub, b: b_sub }
+    }
+
+    fn gen_relinearization_key(&self, secret_key: &SecretKey, params: &QfheParameters) -> RelinearizationKey {
+        let mut rlk_vec = Vec::new();
+        let k = params.module_dimension_k;
+        let l = params.relin_key_len;
+        let base = params.relin_key_base;
+
+        for i in 0..k {
+            for j in 0..k {
+                // s_i * s_j 항을 암호화합니다.
+                let s_i_s_j = self.polynomial_mul(&secret_key.s[i], &secret_key.s[j], params);
+                for m in 0..l {
+                    let mut term = Polynomial::zero(params.polynomial_degree);
+                    term.coeffs[0] = Quaternion::from_scalar(base.pow(m as u32));
+                    let encryption_term = self.polynomial_mul(&term, &s_i_s_j, params);
+                    
+                    // 0을 암호화하되, 메시지 항에 s_i*s_j * T^m 을 추가합니다.
+                    let mut encrypted_term = self.encrypt(0, params, secret_key);
+                    encrypted_term.b = self.polynomial_add(&encrypted_term.b, &encryption_term, params);
+                    rlk_vec.push(encrypted_term);
+                }
+            }
+        }
+        RelinearizationKey(rlk_vec)
     }
 }
