@@ -1,5 +1,5 @@
 use crate::core::{
-    Ciphertext, Polynomial, Quaternion, SecretKey
+    Ciphertext, Polynomial, Quaternion, SecretKey, QfheParameters
 };
 use super::HardwareBackend;
 use rand::Rng;
@@ -66,10 +66,10 @@ fn mul_mod(mut a: u128, mut b: u128, m: u128) -> u128 {
 
 impl HardwareBackend for CpuBackend {
     fn encrypt(&self, message: u64, params: &QfheParameters, secret_key: &SecretKey) -> Ciphertext {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let a_coeffs = (0..params.polynomial_degree).map(|_| Quaternion {
-            w: rng.gen_range(0..params.modulus_q), x: rng.gen_range(0..params.modulus_q),
-            y: rng.gen_range(0..params.modulus_q), z: rng.gen_range(0..params.modulus_q),
+            w: rng.random_range(0..params.modulus_q), x: rng.random_range(0..params.modulus_q),
+            y: rng.random_range(0..params.modulus_q), z: rng.random_range(0..params.modulus_q),
         }).collect();
         let a_poly = Polynomial { coeffs: a_coeffs };
 
@@ -108,9 +108,10 @@ impl HardwareBackend for CpuBackend {
 
     fn polynomial_add(&self, p1: &Polynomial, p2: &Polynomial, params: &QfheParameters) -> Polynomial {
         let mut result_coeffs = Vec::with_capacity(params.polynomial_degree);
+        let zero = Quaternion::zero();
         for i in 0..params.polynomial_degree {
-            let q1 = p1.coeffs.get(i).unwrap_or(&Quaternion::zero());
-            let q2 = p2.coeffs.get(i).unwrap_or(&Quaternion::zero());
+            let q1 = p1.coeffs.get(i).unwrap_or(&zero);
+            let q2 = p2.coeffs.get(i).unwrap_or(&zero);
             result_coeffs.push(Quaternion {
                 w: add_mod(q1.w, q2.w, params.modulus_q), x: add_mod(q1.x, q2.x, params.modulus_q),
                 y: add_mod(q1.y, q2.y, params.modulus_q), z: add_mod(q1.z, q2.z, params.modulus_q),
@@ -121,9 +122,10 @@ impl HardwareBackend for CpuBackend {
 
     fn polynomial_sub(&self, p1: &Polynomial, p2: &Polynomial, params: &QfheParameters) -> Polynomial {
         let mut result_coeffs = Vec::with_capacity(params.polynomial_degree);
+        let zero = Quaternion::zero();
         for i in 0..params.polynomial_degree {
-            let q1 = p1.coeffs.get(i).unwrap_or(&Quaternion::zero());
-            let q2 = p2.coeffs.get(i).unwrap_or(&Quaternion::zero());
+            let q1 = p1.coeffs.get(i).unwrap_or(&zero);
+            let q2 = p2.coeffs.get(i).unwrap_or(&zero);
             let w = add_mod(q1.w, params.modulus_q - q2.w, params.modulus_q);
             let x = add_mod(q1.x, params.modulus_q - q2.x, params.modulus_q);
             let y = add_mod(q1.y, params.modulus_q - q2.y, params.modulus_q);

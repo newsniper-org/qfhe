@@ -4,11 +4,8 @@ use crate::core::{
 use crate::hal::{CpuBackend, HardwareBackend};
 use rand::Rng;
 
-use rand::prelude::*;
-
 // CPU 백엔드를 사용하는 QFHE 컨텍스트 구조체
 // QFHE 컨텍스트 구조체: 이제 암호 파라미터와 키를 포함합니다.
-#[repr(C)]
 pub struct QfheContext {
     backend: Box<dyn HardwareBackend>,
     secret_key: SecretKey,
@@ -37,9 +34,9 @@ impl QfheEngine for QfheContext {
 #[unsafe(no_mangle)]
 pub extern "C" fn qfhe_context_create(level: SecurityLevel) -> *mut QfheContext {
     let params = level.get_params();
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let secret_key_coeffs = (0..params.polynomial_degree).map(|_| {
-        let val: i128 = rng.gen_range(-1..=1);
+        let val: i128 = rng.random_range(-1..=1);
         Quaternion {
             w: val.rem_euclid(params.modulus_q as i128) as u128,
             x: val.rem_euclid(params.modulus_q as i128) as u128,

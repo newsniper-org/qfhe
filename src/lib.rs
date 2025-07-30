@@ -6,7 +6,7 @@ pub mod ffi;
 // --- Public API ---
 // 라이브러리 사용자가 직접 접근할 수 있는 핵심 기능들을 공개(re-export)합니다.
 pub use crate::core::{QfheEngine, Ciphertext, Polynomial, Quaternion, SecretKey,
-    POLYNOMIAL_DEGREE, MODULUS_Q, PLAINTEXT_MODULUS, SCALING_FACTOR_DELTA, NOISE_STD_DEV};
+    QfheParameters};
 pub use crate::ffi::QfheContext;
 
 

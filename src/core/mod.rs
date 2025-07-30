@@ -71,12 +71,10 @@ impl SecurityLevel {
 
 
 /// 비밀키는 4원수들의 벡터입니다.
-#[repr(C)]
 pub struct SecretKey(pub Polynomial);
 
 /// LWE 암호문은 (a, b) 쌍으로 구성됩니다.
 /// a는 4원수들의 벡터이고, b는 단일 4원수입니다.
-#[repr(C)]
 #[derive(Clone, Debug)]
 pub struct Ciphertext {
     pub polynomials: Vec<Polynomial>
