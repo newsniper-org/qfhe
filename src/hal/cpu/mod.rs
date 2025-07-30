@@ -146,92 +146,137 @@ impl HardwareBackend for CpuBackend {
         Polynomial { coeffs: result_coeffs }
     }
 
-    // --- 다항식 연산 (4원수 연산 완전 통합) ---
+    // --- 다항식 연산 (카라츠바 알고리즘 적용) ---
     fn polynomial_mul(&self, p1: &Polynomial, p2: &Polynomial, params: &QfheParameters) -> Polynomial {
         let n = params.polynomial_degree;
-        let mut result = Polynomial::zero(n);
-        for i in 0..n {
-            for j in 0..n {
-                let q1 = p1.coeffs[i];
-                let q2 = p2.coeffs[j];
-                
-                // 4원수 곱셈 (q1 * q2)
-                let w = mul_mod(q1.w, q2.w, params.modulus_q).wrapping_sub(mul_mod(q1.x, q2.x, params.modulus_q))
-                    .wrapping_sub(mul_mod(q1.y, q2.y, params.modulus_q)).wrapping_sub(mul_mod(q1.z, q2.z, params.modulus_q));
-                let x = mul_mod(q1.w, q2.x, params.modulus_q).wrapping_add(mul_mod(q1.x, q2.w, params.modulus_q))
-                    .wrapping_add(mul_mod(q1.y, q2.z, params.modulus_q)).wrapping_sub(mul_mod(q1.z, q2.y, params.modulus_q));
-                let y = mul_mod(q1.w, q2.y, params.modulus_q).wrapping_sub(mul_mod(q1.x, q2.z, params.modulus_q))
-                    .wrapping_add(mul_mod(q1.y, q2.w, params.modulus_q)).wrapping_add(mul_mod(q1.z, q2.x, params.modulus_q));
-                let z = mul_mod(q1.w, q2.z, params.modulus_q).wrapping_add(mul_mod(q1.x, q2.y, params.modulus_q))
-                    .wrapping_sub(mul_mod(q1.y, q2.x, params.modulus_q)).wrapping_add(mul_mod(q1.z, q2.w, params.modulus_q));
-                
-                let product = Quaternion { w, x, y, z };
-                
-                // 다항식 곱셈의 순환 구조 처리 (X^n = -1)
-                let target_index = i + j;
-                if target_index < n {
-                    result.coeffs[target_index].w = add_mod(result.coeffs[target_index].w , product.w, params.modulus_q);
-                    result.coeffs[target_index].x = add_mod(result.coeffs[target_index].x , product.x, params.modulus_q);
-                    result.coeffs[target_index].y = add_mod(result.coeffs[target_index].y , product.y, params.modulus_q);
-                    result.coeffs[target_index].z = add_mod(result.coeffs[target_index].z , product.z, params.modulus_q);
-                } else {
-                    result.coeffs[target_index - n].w = add_mod(result.coeffs[target_index - n].w, (params.modulus_q - product.w), params.modulus_q);
-                    result.coeffs[target_index - n].x = add_mod(result.coeffs[target_index - n].x, (params.modulus_q - product.x), params.modulus_q);
-                    result.coeffs[target_index - n].y = add_mod(result.coeffs[target_index - n].y, (params.modulus_q - product.y), params.modulus_q);
-                    result.coeffs[target_index - n].z = add_mod(result.coeffs[target_index - n].z, (params.modulus_q - product.z), params.modulus_q);
+        let q = params.modulus_q;
+
+        // 재귀 호출의 기본 단계: 특정 크기 이하에서는 교과서적 곱셈 사용
+        if n <= 32 {
+            let mut result_coeffs = vec![Quaternion::zero(); n];
+            let sub_mod = |a: u128, b: u128, m: u128| -> u128 { add_mod(a, m.wrapping_sub(b % m), m) };
+            for i in 0..n {
+                for j in 0..n {
+                    let product = p1.coeffs[i].mul(p2.coeffs[j]);
+                    if i + j < n {
+                        result_coeffs[i + j] = result_coeffs[i + j].add(product);
+                    } else {
+                        result_coeffs[i + j - n] = result_coeffs[i + j - n].sub(product);
+                    }
                 }
             }
+            for coeff in &mut result_coeffs {
+                coeff.w %= q; coeff.x %= q; coeff.y %= q; coeff.z %= q;
+            }
+            return Polynomial { coeffs: result_coeffs };
         }
-        result
+
+        // 1. 다항식 분할
+        let m = n / 2;
+        let p1_low = Polynomial { coeffs: p1.coeffs[0..m].to_vec() };
+        let p1_high = Polynomial { coeffs: p1.coeffs[m..n].to_vec() };
+        let p2_low = Polynomial { coeffs: p2.coeffs[0..m].to_vec() };
+        let p2_high = Polynomial { coeffs: p2.coeffs[m..n].to_vec() };
+        
+        // 분할된 다항식에 맞는 새로운 파라미터 생성
+        let mut sub_params = params.clone();
+        sub_params.polynomial_degree = m;
+
+        // 2. 재귀 호출을 통한 3개의 곱셈
+        // z2 = high * high
+        let z2 = self.polynomial_mul(&p1_high, &p2_high, &sub_params);
+        // z0 = low * low
+        let z0 = self.polynomial_mul(&p1_low, &p2_low, &sub_params);
+        
+        // z1 = (low+high) * (low+high) - z2 - z0
+        let p1_sum = self.polynomial_add(&p1_low, &p1_high, &sub_params);
+        let p2_sum = self.polynomial_add(&p2_low, &p2_high, &sub_params);
+        let z1_intermediate = self.polynomial_mul(&p1_sum, &p2_sum, &sub_params);
+        let z1 = self.polynomial_sub(&self.polynomial_sub(&z1_intermediate, &z2, &sub_params), &z0, &sub_params);
+
+        // 3. 결과 조합
+        // Result = z2 * x^n + z1 * x^m + z0
+        let mut result_coeffs = vec![Quaternion::zero(); n * 2]; // 임시로 두 배 크기 할당
+        for i in 0..n { result_coeffs[i] = z0.coeffs.get(i).cloned().unwrap_or_default(); }
+        for i in 0..n { result_coeffs[i + m] = self.polynomial_add(&Polynomial{coeffs: vec![result_coeffs[i+m]]}, &Polynomial{coeffs: vec![z1.coeffs.get(i).cloned().unwrap_or_default()]}, params).coeffs[0];}
+        for i in 0..n { result_coeffs[i + n] = self.polynomial_add(&Polynomial{coeffs: vec![result_coeffs[i+n]]}, &Polynomial{coeffs: vec![z2.coeffs.get(i).cloned().unwrap_or_default()]}, params).coeffs[0];}
+
+        // 최종적으로 n차 다항식으로 변환 (x^n = -1 적용)
+        let mut final_coeffs = vec![Quaternion::zero(); n];
+        for i in 0..n {
+            let term1 = result_coeffs[i];
+            let term2 = result_coeffs[i+n];
+            final_coeffs[i] = self.polynomial_sub(&Polynomial{coeffs: vec![term1]}, &Polynomial{coeffs: vec![term2]}, params).coeffs[0];
+        }
+
+        Polynomial { coeffs: final_coeffs }
     }
 
     fn homomorphic_mul(&self, ct1: &Ciphertext, ct2: &Ciphertext, rlk: &RelinearizationKey, params: &QfheParameters) -> Ciphertext {
         let k = params.module_dimension_k;
         let n = params.polynomial_degree;
-        let l = params.relin_key_len;
-        let base = params.relin_key_base;
+        let delta = params.scaling_factor_delta;
 
-        // 1. Tensor Product & Scale
-        let scale_and_round = |p: &Polynomial| -> Polynomial {
-            let mut new_poly = p.clone();
-            for coeff in new_poly.coeffs.iter_mut() {
-                coeff.w = ((coeff.w + params.scaling_factor_delta / 2) / params.scaling_factor_delta) % params.modulus_q;
-                // x, y, z components are usually smaller, handle similarly if needed
-            }
-            new_poly
-        };
-        
-        let c0 = scale_and_round(&self.polynomial_mul(&ct1.b, &ct2.b, params));
-        let c1 = (0..k).map(|i| {
-            scale_and_round(&self.polynomial_add(&self.polynomial_mul(&ct1.a_vec[i], &ct2.b, params), &self.polynomial_mul(&ct2.a_vec[i], &ct1.b, params), params))
-        }).collect::<Vec<_>>();
-        let mut c2 = vec![vec![Polynomial::zero(n); k]; k];
+        // Step 1: 암호문 곱셈 (Tensor Product)
+        let d0_prime = self.polynomial_mul(&ct1.b, &ct2.b, params);
+
+        let mut d1_prime = vec![Polynomial::zero(n); k];
         for i in 0..k {
-            for j in 0..k {
-                c2[i][j] = scale_and_round(&self.polynomial_mul(&ct1.a_vec[i], &ct2.a_vec[j], params));
-            }
+            let term1 = self.polynomial_mul(&ct1.a_vec[i], &ct2.b, params);
+            let term2 = self.polynomial_mul(&ct1.b, &ct2.a_vec[i], params);
+            d1_prime[i] = self.polynomial_add(&term1, &term2, params);
         }
+        
+        let d2_prime: Vec<Polynomial> = (0..k).flat_map(|i| {
+            (0..k).map(move |j| self.polynomial_mul(&ct1.a_vec[i], &ct2.a_vec[j], params))
+        }).collect();
 
-        // 2. Relinearization
-        let mut c0_new = c0;
-        let mut c1_new = c1;
+        // Step 2: 재선형화 (Relinearization) - 리스케일링 전에 수행!
+        let d2_decomposed: Vec<Vec<Polynomial>> = d2_prime.iter().map(|p| p.decompose(params.relin_key_base, params.relin_key_len, params)).collect();
+        
+        let mut relin_b_part = Polynomial::zero(n);
+        let mut relin_a_part = vec![Polynomial::zero(n); k];
 
-        for i in 0..k {
-            for j in 0..k {
-                let c2_decomposed = c2[i][j].decompose(base, l, params);
-                for m in 0..l {
-                    let rlk_idx = (i * k + j) * l + m;
-                    let rlk_ct = &rlk.0[rlk_idx];
-                    
-                    c0_new = self.polynomial_sub(&c0_new, &self.polynomial_mul(&c2_decomposed[m], &rlk_ct.b, params), params);
-                    for r in 0..k {
-                        c1_new[r] = self.polynomial_sub(&c1_new[r], &self.polynomial_mul(&c2_decomposed[m], &rlk_ct.a_vec[r], params), params);
-                    }
+        for i in 0..(k * k) {
+            for j in 0..params.relin_key_len {
+                let rlk_ct = &rlk.0[i * params.relin_key_len + j];
+                let decomposed_poly = &d2_decomposed[i][j];
+                
+                let term_b = self.polynomial_mul(decomposed_poly, &rlk_ct.b, params);
+                relin_b_part = self.polynomial_add(&relin_b_part, &term_b, params);
+
+                for l in 0..k {
+                    let term_a = self.polynomial_mul(decomposed_poly, &rlk_ct.a_vec[l], params);
+                    relin_a_part[l] = self.polynomial_add(&relin_a_part[l], &term_a, params);
                 }
             }
         }
+
+        let final_b_unscaled = self.polynomial_add(&d0_prime, &relin_b_part, params);
+        let mut final_a_unscaled = vec![Polynomial::zero(n); k];
+        for i in 0..k {
+            final_a_unscaled[i] = self.polynomial_add(&d1_prime[i], &relin_a_part[i], params);
+        }
         
-        Ciphertext { a_vec: c1_new, b: c0_new }
+        // Step 3: 리스케일링 (Rescaling) - 모든 연산이 끝난 후 마지막에 수행!
+        let rescale = |p: &Polynomial| -> Polynomial {
+            let delta_half = delta / 2;
+            Polynomial {
+                coeffs: p.coeffs.iter().map(|c| {
+                    Quaternion::new(
+                        (c.w + delta_half) / delta,
+                        (c.x + delta_half) / delta,
+                        (c.y + delta_half) / delta,
+                        (c.z + delta_half) / delta
+                    )
+                }).collect()
+            }
+        };
+        
+        let result_b = rescale(&final_b_unscaled);
+        let result_a = final_a_unscaled.iter().map(rescale).collect();
+
+        Ciphertext { b: result_b, a_vec: result_a }
     }
     
     fn homomorphic_add(&self, ct1: &Ciphertext, ct2: &Ciphertext, params: &QfheParameters) -> Ciphertext {
