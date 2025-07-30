@@ -4,16 +4,71 @@ pub use crate::core::quaternion::Quaternion;
 pub mod polynominal;
 pub use crate::core::polynominal::Polynomial;
 
+/// C FFI에서 사용할 보안 수준 열거형입니다.
+#[repr(C)]
+pub enum SecurityLevel {
+    L128,
+    L160,
+    L192,
+    L224,
+    L256,
+}
 
-// --- 암호화 파라미터 정의 ---
-// --- 64비트 메시지 공간을 위한 파라미터 재조정 ---
-pub const POLYNOMIAL_DEGREE: usize = 2048; // 보안 강화를 위해 차수 증가
-pub const MODULUS_Q: u128 = 340282366920938463463374607431768211293; // 125-bit prime: (1 << 125) - 159
-pub const PLAINTEXT_MODULUS: u128 = 1 << 64; // 64비트 메시지 공간
-pub const SCALING_FACTOR_DELTA: u128 = MODULUS_Q / PLAINTEXT_MODULUS;
-pub const NOISE_STD_DEV: f64 = 3.2; // 오차 분포는 유지 (더 큰 파라미터로 인해 상대적으로 작아짐)
+/// 각 보안 수준에 맞는 파라미터 세트를 담는 구조체입니다.
+#[derive(Debug, Clone)]
+pub struct QfheParameters {
+    pub polynomial_degree: usize,
+    pub modulus_q: u128,
+    pub plaintext_modulus: u128,
+    pub scaling_factor_delta: u128,
+    pub noise_std_dev: f64,
+}
 
-// --- 새로운 데이터 구조 ---
+impl SecurityLevel {
+    /// 선택된 보안 수준에 맞는 파라미터 세트를 반환합니다.
+    /// 이 파라미터들은 표준 FHE 문헌을 참고한 예시 값입니다.
+    pub fn get_params(&self) -> QfheParameters {
+        match self {
+            SecurityLevel::L128 => QfheParameters {
+                polynomial_degree: 1024,
+                modulus_q: 180143985094819841, // 58-bit prime
+                plaintext_modulus: 1 << 32,
+                scaling_factor_delta: 180143985094819841 / (1 << 32),
+                noise_std_dev: 3.2,
+            },
+            SecurityLevel::L160 => QfheParameters {
+                polynomial_degree: 1024,
+                modulus_q: 2882303761517117441, // 62-bit prime
+                plaintext_modulus: 1 << 32,
+                scaling_factor_delta: 2882303761517117441 / (1 << 32),
+                noise_std_dev: 3.2,
+            },
+            SecurityLevel::L192 => QfheParameters {
+                polynomial_degree: 2048,
+                modulus_q: 340282366920938463463374607431768211293, // 125-bit prime
+                plaintext_modulus: 1 << 64,
+                scaling_factor_delta: 340282366920938463463374607431768211293 / (1 << 64),
+                noise_std_dev: 3.2,
+            },
+            SecurityLevel::L224 => QfheParameters {
+                polynomial_degree: 2048,
+                modulus_q: 340282366920938463463374607431768211293, // 125-bit prime
+                plaintext_modulus: 1 << 64,
+                scaling_factor_delta: 340282366920938463463374607431768211293 / (1 << 64),
+                noise_std_dev: 3.2,
+            },
+            SecurityLevel::L256 => QfheParameters {
+                polynomial_degree: 4096,
+                modulus_q: 340282366920938463463374607431768211293, // 125-bit prime
+                plaintext_modulus: 1 << 64,
+                scaling_factor_delta: 340282366920938463463374607431768211293 / (1 << 64),
+                noise_std_dev: 3.2,
+            },
+        }
+    }
+}
+
+
 
 /// 비밀키는 4원수들의 벡터입니다.
 #[repr(C)]

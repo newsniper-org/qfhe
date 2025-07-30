@@ -1,6 +1,5 @@
 use crate::core::{
-    Ciphertext, Polynomial, Quaternion, SecretKey,
-    POLYNOMIAL_DEGREE, MODULUS_Q, SCALING_FACTOR_DELTA, NOISE_STD_DEV
+    Ciphertext, Polynomial, Quaternion, SecretKey
 };
 use super::HardwareBackend;
 use rand::Rng;
@@ -8,9 +7,9 @@ use rand_distr::{Normal, Distribution};
 
 pub struct CpuBackend;
 
-fn sample_discrete_gaussian() -> i128 {
+fn sample_discrete_gaussian(noise_std_dev: f64) -> i128 {
     let mut rng = rand::rng();
-    let normal = Normal::new(0.0, NOISE_STD_DEV).unwrap();
+    let normal = Normal::new(0.0, noise_std_dev).unwrap();
     normal.sample(&mut rng).round() as i128
 }
 
@@ -66,113 +65,102 @@ fn mul_mod(mut a: u128, mut b: u128, m: u128) -> u128 {
 
 
 impl HardwareBackend for CpuBackend {
-    fn encrypt(&self, message: u64, secret_key: &SecretKey) -> Ciphertext {
-        let mut rng = rand::rng();
-        let a_coeffs = (0..POLYNOMIAL_DEGREE).map(|_| Quaternion {
-            w: rng.random_range(0..MODULUS_Q), x: rng.random_range(0..MODULUS_Q),
-            y: rng.random_range(0..MODULUS_Q), z: rng.random_range(0..MODULUS_Q),
+    fn encrypt(&self, message: u64, params: &QfheParameters, secret_key: &SecretKey) -> Ciphertext {
+        let mut rng = rand::thread_rng();
+        let a_coeffs = (0..params.polynomial_degree).map(|_| Quaternion {
+            w: rng.gen_range(0..params.modulus_q), x: rng.gen_range(0..params.modulus_q),
+            y: rng.gen_range(0..params.modulus_q), z: rng.gen_range(0..params.modulus_q),
         }).collect();
         let a_poly = Polynomial { coeffs: a_coeffs };
 
-        let e_coeffs = (0..POLYNOMIAL_DEGREE).map(|_| Quaternion {
-            w: sample_discrete_gaussian().rem_euclid(MODULUS_Q as i128) as u128,
-            x: sample_discrete_gaussian().rem_euclid(MODULUS_Q as i128) as u128,
-            y: sample_discrete_gaussian().rem_euclid(MODULUS_Q as i128) as u128,
-            z: sample_discrete_gaussian().rem_euclid(MODULUS_Q as i128) as u128,
+        let e_coeffs = (0..params.polynomial_degree).map(|_| Quaternion {
+            w: sample_discrete_gaussian(params.noise_std_dev).rem_euclid(params.modulus_q as i128) as u128,
+            x: sample_discrete_gaussian(params.noise_std_dev).rem_euclid(params.modulus_q as i128) as u128,
+            y: sample_discrete_gaussian(params.noise_std_dev).rem_euclid(params.modulus_q as i128) as u128,
+            z: sample_discrete_gaussian(params.noise_std_dev).rem_euclid(params.modulus_q as i128) as u128,
         }).collect();
         let e_poly = Polynomial { coeffs: e_coeffs };
         
-        let mut scaled_m_coeffs = vec![Quaternion::zero(); POLYNOMIAL_DEGREE];
-        // 64비트 메시지를 u128로 변환하여 스케일링
-        scaled_m_coeffs[0] = Quaternion::from_scalar((message as u128) * SCALING_FACTOR_DELTA);
+        let mut scaled_m_coeffs = vec![Quaternion::zero(); params.polynomial_degree];
+        let plaintext_mask = params.plaintext_modulus - 1;
+        scaled_m_coeffs[0] = Quaternion::from_scalar(((message as u128) & plaintext_mask) * params.scaling_factor_delta);
         let scaled_m_poly = Polynomial { coeffs: scaled_m_coeffs };
 
-        let as_poly = self.polynomial_mul(&a_poly, &secret_key.0);
-        let b_poly = self.polynomial_add(&as_poly, &e_poly);
-        let b_poly = self.polynomial_add(&b_poly, &scaled_m_poly);
+        let as_poly = self.polynomial_mul(&a_poly, &secret_key.0, params);
+        let b_poly = self.polynomial_add(&as_poly, &e_poly, params);
+        let b_poly = self.polynomial_add(&b_poly, &scaled_m_poly, params);
 
         Ciphertext { polynomials: vec![a_poly, b_poly] }
     }
 
-    fn decrypt(&self, ciphertext: &Ciphertext, secret_key: &SecretKey) -> u64 {
+    fn decrypt(&self, ciphertext: &Ciphertext, params: &QfheParameters, secret_key: &SecretKey) -> u64 {
         if ciphertext.polynomials.len() < 2 { return 0; }
         let a_poly = &ciphertext.polynomials[0];
         let b_poly = &ciphertext.polynomials[1];
-        let as_poly = self.polynomial_mul(a_poly, &secret_key.0);
-        let m_prime_poly = self.polynomial_sub(b_poly, &as_poly);
+        let as_poly = self.polynomial_mul(a_poly, &secret_key.0, params);
+        let m_prime_poly = self.polynomial_sub(b_poly, &as_poly, params);
         let noisy_message = m_prime_poly.coeffs[0].w;
 
-        let half_delta = SCALING_FACTOR_DELTA / 2;
-        let rounded_val = (noisy_message + half_delta) % MODULUS_Q;
-        // u128 결과를 u64로 변환하여 반환
-        (rounded_val / SCALING_FACTOR_DELTA) as u64
+        let half_delta = params.scaling_factor_delta / 2;
+        let rounded_val = add_mod(noisy_message, half_delta, params.modulus_q);
+        (rounded_val / params.scaling_factor_delta) as u64
     }
 
-    fn polynomial_add(&self, p1: &Polynomial, p2: &Polynomial) -> Polynomial {
-        let mut result_coeffs = Vec::with_capacity(POLYNOMIAL_DEGREE);
-        let zero = Quaternion::zero();
-        for i in 0..POLYNOMIAL_DEGREE {
-            let q1 = p1.coeffs.get(i).unwrap_or(&zero);
-            let q2 = p2.coeffs.get(i).unwrap_or(&zero);
+    fn polynomial_add(&self, p1: &Polynomial, p2: &Polynomial, params: &QfheParameters) -> Polynomial {
+        let mut result_coeffs = Vec::with_capacity(params.polynomial_degree);
+        for i in 0..params.polynomial_degree {
+            let q1 = p1.coeffs.get(i).unwrap_or(&Quaternion::zero());
+            let q2 = p2.coeffs.get(i).unwrap_or(&Quaternion::zero());
             result_coeffs.push(Quaternion {
-                w: add_mod(q1.w, q2.w,MODULUS_Q), x: add_mod(q1.x, q2.x,MODULUS_Q),
-                y: add_mod(q1.y, q2.y, MODULUS_Q), z: add_mod(q1.z, q2.z, MODULUS_Q)
+                w: add_mod(q1.w, q2.w, params.modulus_q), x: add_mod(q1.x, q2.x, params.modulus_q),
+                y: add_mod(q1.y, q2.y, params.modulus_q), z: add_mod(q1.z, q2.z, params.modulus_q),
             });
         }
         Polynomial { coeffs: result_coeffs }
     }
 
-    fn polynomial_sub(&self, p1: &Polynomial, p2: &Polynomial) -> Polynomial {
-        let mut result_coeffs = Vec::with_capacity(POLYNOMIAL_DEGREE);
-        let zero = Quaternion::zero();
-        for i in 0..POLYNOMIAL_DEGREE {
-            let q1 = p1.coeffs.get(i).unwrap_or(&zero);
-            let q2 = p2.coeffs.get(i).unwrap_or(&zero);
-            // 더 안전한 모듈러 뺄셈: (a - b) mod m = (a + (m - b)) mod m
-            let w = add_mod(q1.w, MODULUS_Q - q2.w,MODULUS_Q);
-            let x = add_mod(q1.x, MODULUS_Q - q2.x,MODULUS_Q);
-            let y = add_mod(q1.y, MODULUS_Q - q2.y,MODULUS_Q);
-            let z = add_mod(q1.z, MODULUS_Q - q2.z,MODULUS_Q);
+    fn polynomial_sub(&self, p1: &Polynomial, p2: &Polynomial, params: &QfheParameters) -> Polynomial {
+        let mut result_coeffs = Vec::with_capacity(params.polynomial_degree);
+        for i in 0..params.polynomial_degree {
+            let q1 = p1.coeffs.get(i).unwrap_or(&Quaternion::zero());
+            let q2 = p2.coeffs.get(i).unwrap_or(&Quaternion::zero());
+            let w = add_mod(q1.w, params.modulus_q - q2.w, params.modulus_q);
+            let x = add_mod(q1.x, params.modulus_q - q2.x, params.modulus_q);
+            let y = add_mod(q1.y, params.modulus_q - q2.y, params.modulus_q);
+            let z = add_mod(q1.z, params.modulus_q - q2.z, params.modulus_q);
             result_coeffs.push(Quaternion { w, x, y, z });
         }
         Polynomial { coeffs: result_coeffs }
     }
 
-    fn polynomial_mul(&self, p1: &Polynomial, p2: &Polynomial) -> Polynomial {
-        let mut result = Polynomial::zero(POLYNOMIAL_DEGREE);
-        for i in 0..POLYNOMIAL_DEGREE {
-            for j in 0..POLYNOMIAL_DEGREE {
-                if p1.coeffs[i].w == 0 { continue; } // p2 계수가 0인 경우는 mul_mod에서 처리되므로 논외
-                let index = (i + j) % POLYNOMIAL_DEGREE;
-                let val = mul_mod(p1.coeffs[i].w, p2.coeffs[j].w, MODULUS_Q);
-                if result.coeffs[index].w > (MODULUS_Q - val) {
-                    result.coeffs[index].w = result.coeffs[index].w - (MODULUS_Q - val);
-                } else {
-                    result.coeffs[index].w = result.coeffs[index].w + val;
-                }
+    fn polynomial_mul(&self, p1: &Polynomial, p2: &Polynomial, params: &QfheParameters) -> Polynomial {
+        let mut result = Polynomial::zero(params.polynomial_degree);
+        for i in 0..params.polynomial_degree {
+            for j in 0..params.polynomial_degree {
+                if p1.coeffs[i].w == 0 { continue; }
+                let index = (i + j) % params.polynomial_degree;
+                let val = mul_mod(p1.coeffs[i].w, p2.coeffs[j].w, params.modulus_q);
+                result.coeffs[index].w = add_mod(result.coeffs[index].w, val, params.modulus_q);
             }
         }
         result
     }
     
-    fn homomorphic_add(&self, ct1: &Ciphertext, ct2: &Ciphertext) -> Ciphertext {
-        if ct1.polynomials.len() < 2 || ct2.polynomials.len() < 2 {
-            panic!("Invalid ciphertext format");
-        }
+    fn homomorphic_add(&self, ct1: &Ciphertext, ct2: &Ciphertext, params: &QfheParameters) -> Ciphertext {
+        if ct1.polynomials.len() < 2 || ct2.polynomials.len() < 2 { panic!("Invalid ciphertext"); }
         let a1 = &ct1.polynomials[0]; let b1 = &ct1.polynomials[1];
         let a2 = &ct2.polynomials[0]; let b2 = &ct2.polynomials[1];
-        let a_add = self.polynomial_add(a1, a2);
-        let b_add = self.polynomial_add(b1, b2);
+        let a_add = self.polynomial_add(a1, a2, params);
+        let b_add = self.polynomial_add(b1, b2, params);
         Ciphertext { polynomials: vec![a_add, b_add] }
     }
-    fn homomorphic_sub(&self, ct1: &Ciphertext, ct2: &Ciphertext) -> Ciphertext {
-        if ct1.polynomials.len() < 2 || ct2.polynomials.len() < 2 {
-            panic!("Invalid ciphertext format");
-        }
+
+    fn homomorphic_sub(&self, ct1: &Ciphertext, ct2: &Ciphertext, params: &QfheParameters) -> Ciphertext {
+        if ct1.polynomials.len() < 2 || ct2.polynomials.len() < 2 { panic!("Invalid ciphertext"); }
         let a1 = &ct1.polynomials[0]; let b1 = &ct1.polynomials[1];
         let a2 = &ct2.polynomials[0]; let b2 = &ct2.polynomials[1];
-        let a_add = self.polynomial_sub(a1, a2);
-        let b_add = self.polynomial_sub(b1, b2);
-        Ciphertext { polynomials: vec![a_add, b_add] }
+        let a_sub = self.polynomial_sub(a1, a2, params);
+        let b_sub = self.polynomial_sub(b1, b2, params);
+        Ciphertext { polynomials: vec![a_sub, b_sub] }
     }
 }

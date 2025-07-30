@@ -21,7 +21,7 @@ mod tests {
     fn test_encryption_decryption_large_numbers() {
         println!("--- 64비트 암호화/복호화 정확성 테스트 시작 ---");
         
-        let context_ptr = qfhe_context_create();
+        let context_ptr = qfhe_context_create(crate::core::SecurityLevel::L128);
         let context = unsafe { &*(context_ptr as *mut QfheContext) };
         println!("테스트 컨텍스트 생성 완료.");
 
@@ -45,7 +45,7 @@ mod tests {
     fn test_homomorphic_addition_large_numbers() {
         println!("--- 64비트 동형 덧셈 정확성 테스트 시작 ---");
 
-        let context_ptr = qfhe_context_create();
+        let context_ptr = qfhe_context_create(crate::core::SecurityLevel::L128);
         let context = unsafe { &*(context_ptr as *mut QfheContext) };
         println!("테스트 컨텍스트 생성 완료.");
 
