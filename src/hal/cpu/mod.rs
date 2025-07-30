@@ -65,33 +65,33 @@ fn mul_mod(mut a: u128, mut b: u128, m: u128) -> u128 {
 
 
 impl HardwareBackend for CpuBackend {
+    // --- 암호화/복호화 ---
     fn encrypt(&self, message: u64, params: &QfheParameters, secret_key: &SecretKey) -> Ciphertext {
         let mut rng = rand::rng();
         let k = params.module_dimension_k;
+        let n = params.polynomial_degree;
 
-        // 1. a_vec: k개의 무작위 다항식 벡터 생성
         let a_vec = (0..k).map(|_| {
-            let coeffs = (0..params.polynomial_degree).map(|_| Quaternion {
-                w: rng.random_range(0..params.modulus_q), x: 0, y: 0, z: 0,
+            let coeffs = (0..n).map(|_| Quaternion {
+                w: rng.random_range(0..params.modulus_q), x: rng.random_range(0..params.modulus_q),
+                y: rng.random_range(0..params.modulus_q), z: rng.random_range(0..params.modulus_q),
             }).collect();
             Polynomial { coeffs }
         }).collect::<Vec<_>>();
 
-        // 2. e: 작은 오차 다항식 생성
-        let e_coeffs = (0..params.polynomial_degree).map(|_| Quaternion {
+        let e_coeffs = (0..n).map(|_| Quaternion {
             w: sample_discrete_gaussian(params.noise_std_dev).rem_euclid(params.modulus_q as i128) as u128,
-            x: 0, y: 0, z: 0,
+            x: sample_discrete_gaussian(params.noise_std_dev).rem_euclid(params.modulus_q as i128) as u128,
+            y: sample_discrete_gaussian(params.noise_std_dev).rem_euclid(params.modulus_q as i128) as u128,
+            z: sample_discrete_gaussian(params.noise_std_dev).rem_euclid(params.modulus_q as i128) as u128,
         }).collect();
         let e_poly = Polynomial { coeffs: e_coeffs };
         
-        // 3. m: 메시지 인코딩
-        let mut scaled_m_coeffs = vec![Quaternion::zero(); params.polynomial_degree];
-        let plaintext_mask = params.plaintext_modulus - 1;
-        scaled_m_coeffs[0] = Quaternion::from_scalar(((message as u128) & plaintext_mask) * params.scaling_factor_delta);
+        let mut scaled_m_coeffs = vec![Quaternion::zero(); n];
+        scaled_m_coeffs[0] = Quaternion::from_scalar((message as u128) * params.scaling_factor_delta);
         let scaled_m_poly = Polynomial { coeffs: scaled_m_coeffs };
 
-        // 4. b = <a, s> + e + m 계산
-        let mut as_poly = Polynomial::zero(params.polynomial_degree);
+        let mut as_poly = Polynomial::zero(n);
         for i in 0..k {
             let product = self.polynomial_mul(&a_vec[i], &secret_key.s[i], params);
             as_poly = self.polynomial_add(&as_poly, &product, params);
@@ -105,19 +105,13 @@ impl HardwareBackend for CpuBackend {
 
     fn decrypt(&self, ciphertext: &Ciphertext, params: &QfheParameters, secret_key: &SecretKey) -> u64 {
         let k = params.module_dimension_k;
-        
-        // 1. <a, s> 계산
         let mut as_poly = Polynomial::zero(params.polynomial_degree);
         for i in 0..k {
             let product = self.polynomial_mul(&ciphertext.a_vec[i], &secret_key.s[i], params);
             as_poly = self.polynomial_add(&as_poly, &product, params);
         }
-
-        // 2. m' = b - <a, s>
         let m_prime_poly = self.polynomial_sub(&ciphertext.b, &as_poly, params);
         let noisy_message = m_prime_poly.coeffs[0].w;
-
-        // 3. 디코딩
         let half_delta = params.scaling_factor_delta / 2;
         let rounded_val = add_mod(noisy_message, half_delta, params.modulus_q);
         (rounded_val / params.scaling_factor_delta) as u64
@@ -152,6 +146,7 @@ impl HardwareBackend for CpuBackend {
         Polynomial { coeffs: result_coeffs }
     }
 
+    // --- 다항식 연산 (4원수 연산 완전 통합) ---
     fn polynomial_mul(&self, p1: &Polynomial, p2: &Polynomial, params: &QfheParameters) -> Polynomial {
         let n = params.polynomial_degree;
         let mut result = Polynomial::zero(n);
@@ -160,23 +155,15 @@ impl HardwareBackend for CpuBackend {
                 let q1 = p1.coeffs[i];
                 let q2 = p2.coeffs[j];
                 
-                // --- 4원수 곱셈 (q1 * q2) 로직 ---
-                let w = mul_mod(q1.w, q2.w, params.modulus_q)
-                    .wrapping_sub(mul_mod(q1.x, q2.x, params.modulus_q))
-                    .wrapping_sub(mul_mod(q1.y, q2.y, params.modulus_q))
-                    .wrapping_sub(mul_mod(q1.z, q2.z, params.modulus_q));
-                let x = mul_mod(q1.w, q2.x, params.modulus_q)
-                    .wrapping_add(mul_mod(q1.x, q2.w, params.modulus_q))
-                    .wrapping_add(mul_mod(q1.y, q2.z, params.modulus_q))
-                    .wrapping_sub(mul_mod(q1.z, q2.y, params.modulus_q));
-                let y = mul_mod(q1.w, q2.y, params.modulus_q)
-                    .wrapping_sub(mul_mod(q1.x, q2.z, params.modulus_q))
-                    .wrapping_add(mul_mod(q1.y, q2.w, params.modulus_q))
-                    .wrapping_add(mul_mod(q1.z, q2.x, params.modulus_q));
-                let z = mul_mod(q1.w, q2.z, params.modulus_q)
-                    .wrapping_add(mul_mod(q1.x, q2.y, params.modulus_q))
-                    .wrapping_sub(mul_mod(q1.y, q2.x, params.modulus_q))
-                    .wrapping_add(mul_mod(q1.z, q2.w, params.modulus_q));
+                // 4원수 곱셈 (q1 * q2)
+                let w = mul_mod(q1.w, q2.w, params.modulus_q).wrapping_sub(mul_mod(q1.x, q2.x, params.modulus_q))
+                    .wrapping_sub(mul_mod(q1.y, q2.y, params.modulus_q)).wrapping_sub(mul_mod(q1.z, q2.z, params.modulus_q));
+                let x = mul_mod(q1.w, q2.x, params.modulus_q).wrapping_add(mul_mod(q1.x, q2.w, params.modulus_q))
+                    .wrapping_add(mul_mod(q1.y, q2.z, params.modulus_q)).wrapping_sub(mul_mod(q1.z, q2.y, params.modulus_q));
+                let y = mul_mod(q1.w, q2.y, params.modulus_q).wrapping_sub(mul_mod(q1.x, q2.z, params.modulus_q))
+                    .wrapping_add(mul_mod(q1.y, q2.w, params.modulus_q)).wrapping_add(mul_mod(q1.z, q2.x, params.modulus_q));
+                let z = mul_mod(q1.w, q2.z, params.modulus_q).wrapping_add(mul_mod(q1.x, q2.y, params.modulus_q))
+                    .wrapping_sub(mul_mod(q1.y, q2.x, params.modulus_q)).wrapping_add(mul_mod(q1.z, q2.w, params.modulus_q));
                 
                 let product = Quaternion { w, x, y, z };
                 
@@ -206,15 +193,23 @@ impl HardwareBackend for CpuBackend {
         let base = params.relin_key_base;
 
         // 1. Tensor Product & Scale
-        let scale = params.scaling_factor_delta;
-        let c0 = self.polynomial_mul(&ct1.b, &ct2.b, params).scale_and_round(scale, params);
+        let scale_and_round = |p: &Polynomial| -> Polynomial {
+            let mut new_poly = p.clone();
+            for coeff in new_poly.coeffs.iter_mut() {
+                coeff.w = ((coeff.w + params.scaling_factor_delta / 2) / params.scaling_factor_delta) % params.modulus_q;
+                // x, y, z components are usually smaller, handle similarly if needed
+            }
+            new_poly
+        };
+        
+        let c0 = scale_and_round(&self.polynomial_mul(&ct1.b, &ct2.b, params));
         let mut c1 = (0..k).map(|i| {
-            self.polynomial_add(&self.polynomial_mul(&ct1.a_vec[i], &ct2.b, params), &self.polynomial_mul(&ct2.a_vec[i], &ct1.b, params), params).scale_and_round(scale, params)
+            scale_and_round(&self.polynomial_add(&self.polynomial_mul(&ct1.a_vec[i], &ct2.b, params), &self.polynomial_mul(&ct2.a_vec[i], &ct1.b, params), params))
         }).collect::<Vec<_>>();
         let mut c2 = vec![vec![Polynomial::zero(n); k]; k];
         for i in 0..k {
             for j in 0..k {
-                c2[i][j] = self.polynomial_mul(&ct1.a_vec[i], &ct2.a_vec[j], params).scale_and_round(scale, params);
+                c2[i][j] = scale_and_round(&self.polynomial_mul(&ct1.a_vec[i], &ct2.a_vec[j], params));
             }
         }
 
@@ -224,14 +219,14 @@ impl HardwareBackend for CpuBackend {
 
         for i in 0..k {
             for j in 0..k {
-                let c2_decomposed = c2[i][j].decompose(base, l);
+                let c2_decomposed = c2[i][j].decompose(base, l, params);
                 for m in 0..l {
                     let rlk_idx = (i * k + j) * l + m;
                     let rlk_ct = &rlk.0[rlk_idx];
                     
-                    c0_new = self.polynomial_add(&c0_new, &self.polynomial_mul(&c2_decomposed[m], &rlk_ct.b, params), params);
+                    c0_new = self.polynomial_sub(&c0_new, &self.polynomial_mul(&c2_decomposed[m], &rlk_ct.b, params), params);
                     for r in 0..k {
-                        c1_new[r] = self.polynomial_add(&c1_new[r], &self.polynomial_mul(&c2_decomposed[m], &rlk_ct.a_vec[r], params), params);
+                        c1_new[r] = self.polynomial_sub(&c1_new[r], &self.polynomial_mul(&c2_decomposed[m], &rlk_ct.a_vec[r], params), params);
                     }
                 }
             }
@@ -258,20 +253,22 @@ impl HardwareBackend for CpuBackend {
         Ciphertext { a_vec: a_vec_sub, b: b_sub }
     }
 
+    // --- 동형 곱셈 및 재선형화 ---
     fn gen_relinearization_key(&self, secret_key: &SecretKey, params: &QfheParameters) -> RelinearizationKey {
         let mut rlk_vec = Vec::new();
         let k = params.module_dimension_k;
+        let n = params.polynomial_degree;
         let l = params.relin_key_len;
         let base = params.relin_key_base;
 
         for i in 0..k {
             for j in 0..k {
-                // s_i * s_j 항을 암호화합니다.
-                let s_i_s_j = self.polynomial_mul(&secret_key.s[i], &secret_key.s[j], params);
+                let s_i_s_j = &secret_key.s_squared[i * k + j];
                 for m in 0..l {
-                    let mut term = Polynomial::zero(params.polynomial_degree);
+                    // s_i*s_j * T^m 항을 암호화합니다.
+                    let mut term = Polynomial::zero(n);
                     term.coeffs[0] = Quaternion::from_scalar(base.pow(m as u32));
-                    let encryption_term = self.polynomial_mul(&term, &s_i_s_j, params);
+                    let encryption_term = self.polynomial_mul(&term, s_i_s_j, params);
                     
                     // 0을 암호화하되, 메시지 항에 s_i*s_j * T^m 을 추가합니다.
                     let mut encrypted_term = self.encrypt(0, params, secret_key);

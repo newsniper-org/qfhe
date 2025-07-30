@@ -14,6 +14,7 @@ pub trait HardwareBackend {
     fn polynomial_sub(&self, p1: &Polynomial, p2: &Polynomial, params: &QfheParameters) -> Polynomial;
     fn polynomial_mul(&self, p1: &Polynomial, p2: &Polynomial, params: &QfheParameters) -> Polynomial;
 
+    // 재선형화 키 생성을 위한 함수 추가
     fn gen_relinearization_key(&self, secret_key: &SecretKey, params: &QfheParameters) -> RelinearizationKey;
 }
 
