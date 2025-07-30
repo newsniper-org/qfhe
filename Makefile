@@ -26,6 +26,7 @@ endif
 # C source and executable
 C_SOURCE := demo/main.c
 C_EXECUTABLE := main_demo
+C_PATH := /usr/lib/gcc/x86_64-redhat-linux/15/include/
 
 .PHONY: all build run clean
 
@@ -39,7 +40,7 @@ build: $(LIB_PATH)
 # Build the Rust library (which also generates the header via build.rs)
 $(LIB_PATH): src/lib.rs src/core/mod.rs src/hal/mod.rs src/ffi.rs Cargo.toml build.rs
 	@echo "Building Rust library and generating C header..."
-	@cargo build
+	CPATH="$(C_PATH)" cargo build
 	@echo "Rust library '$(LIB_NAME)' built."
 
 # Run the C executable

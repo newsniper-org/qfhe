@@ -5,7 +5,8 @@ pub mod ffi;
 
 // --- Public API ---
 // 라이브러리 사용자가 직접 접근할 수 있는 핵심 기능들을 공개(re-export)합니다.
-pub use crate::core::{QfheEngine, Ciphertext, Polynomial, Quaternion};
+pub use crate::core::{QfheEngine, Ciphertext, Polynomial, Quaternion, SecretKey,
+    POLYNOMIAL_DEGREE, MODULUS_Q, PLAINTEXT_MODULUS, SCALING_FACTOR_DELTA, NOISE_STD_DEV};
 pub use crate::ffi::QfheContext;
 
 
@@ -13,7 +14,7 @@ pub use crate::ffi::QfheContext;
 // `cargo test` 명령어를 실행할 때만 컴파일되고 실행됩니다.
 #[cfg(test)]
 mod tests {
-    use super::{QfheContext}; 
+    use super::QfheContext; 
     use super::ffi::{qfhe_context_create, qfhe_context_destroy};
     
     #[test]

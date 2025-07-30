@@ -1,5 +1,6 @@
 use super::quaternion::Quaternion;
 
+#[repr(C)]
 #[derive(Clone, Debug)]
 pub struct Polynomial {
     pub coeffs: Vec<Quaternion>,

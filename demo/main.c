@@ -2,6 +2,10 @@
 #include <stdint.h>
 #include "include/qfhe.h"
 
+typedef void QfheContext;
+typedef void Ciphertext;
+
+
 int main() {
     printf("--- QFHE Software Stack Demo ---\n\n");
 

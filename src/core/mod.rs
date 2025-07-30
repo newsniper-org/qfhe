@@ -16,6 +16,7 @@ pub const NOISE_STD_DEV: f64 = 3.2; // 오차 분포는 유지 (더 큰 파라�
 // --- 새로운 데이터 구조 ---
 
 /// 비밀키는 4원수들의 벡터입니다.
+#[repr(C)]
 pub struct SecretKey(pub Polynomial);
 
 /// LWE 암호문은 (a, b) 쌍으로 구성됩니다.
