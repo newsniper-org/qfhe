@@ -1,6 +1,3 @@
-#![feature(f128)]
-#![feature(random)]
-
 // 라이브러리의 각 모듈을 선언합니다.
 pub mod core;
 pub mod hal;

@@ -11,6 +11,7 @@ use rand::prelude::*;
 
 // CPU 백엔드를 사용하는 QFHE 컨텍스트 구조체
 // QFHE 컨텍스트 구조체: 이제 암호 파라미터와 키를 포함합니다.
+#[repr(C)]
 pub struct QfheContext {
     backend: Box<dyn HardwareBackend>,
     secret_key: SecretKey,

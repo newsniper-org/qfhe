@@ -1,6 +1,3 @@
-#![feature(f128)]
-#![feature(random)]
-
 use bindgen::builder;
 
 fn main() {
