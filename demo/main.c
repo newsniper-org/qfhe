@@ -3,10 +3,10 @@
 #include "include/qfhe.h"
 
 int main() {
-    printf("--- Q-FHE Software Stack Demo ---\n\n");
+    printf("--- QFHE Software Stack Demo ---\n\n");
 
-    // 1. Create a Q-FHE context
-    printf("1. Creating Q-FHE context...\n");
+    // 1. Create a QFHE context
+    printf("1. Creating QFHE context...\n");
     QfheContext* context = qfhe_context_create();
     if (!context) {
         printf("Error: Failed to create context.\n");

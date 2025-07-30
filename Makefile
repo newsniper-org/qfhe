@@ -1,4 +1,4 @@
-# Makefile for building and running the Q-FHE demo
+# Makefile for building and running the QFHE demo
 
 # Rust target directory
 RUST_TARGET_DIR := target/debug
