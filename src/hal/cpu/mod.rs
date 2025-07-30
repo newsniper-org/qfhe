@@ -49,6 +49,10 @@ fn add_mod(a: u128, b: u128, m: u128) -> u128 {
     }
 }
 
+fn sub_mod(a: u128, b: u128, m: u128) -> u128 {
+    add_mod(a,m-(b%m),m)
+}
+
 fn mul_mod(mut a: u128, mut b: u128, m: u128) -> u128 {
     // 이진 곱셈(Binary Multiplication)을 사용하여 오버플로우를 방지합니다.
     let mut res: u128 = 0;
@@ -146,27 +150,41 @@ impl HardwareBackend for CpuBackend {
         Polynomial { coeffs: result_coeffs }
     }
 
-    // --- 다항식 연산 (카라츠바 알고리즘 적용) ---
+    // --- 다항식 연산 (카라츠바 알고리즘 오버플로우 수정) ---
     fn polynomial_mul(&self, p1: &Polynomial, p2: &Polynomial, params: &QfheParameters) -> Polynomial {
         let n = params.polynomial_degree;
         let q = params.modulus_q;
 
-        // 재귀 호출의 기본 단계: 특정 크기 이하에서는 교과서적 곱셈 사용
+        // 재귀 호출의 기본 단계: 특정 크기(32) 이하에서는 교과서적 곱셈 사용
         if n <= 32 {
             let mut result_coeffs = vec![Quaternion::zero(); n];
-            let sub_mod = |a: u128, b: u128, m: u128| -> u128 { add_mod(a, m.wrapping_sub(b % m), m) };
+
             for i in 0..n {
                 for j in 0..n {
-                    let product = p1.coeffs[i].mul(p2.coeffs[j]);
-                    if i + j < n {
-                        result_coeffs[i + j] = result_coeffs[i + j].add(product);
+                    let q1_c = p1.coeffs[i];
+                    let q2_c = p2.coeffs[j];
+
+                    // 4원수 곱셈 (모듈러 연산)
+                    let w = sub_mod(sub_mod(sub_mod(mul_mod(q1_c.w, q2_c.w, q), mul_mod(q1_c.x, q2_c.x, q),q), mul_mod(q1_c.y, q2_c.y, q),q), mul_mod(q1_c.z, q2_c.z, q),q);
+                    let x = add_mod(add_mod(add_mod(mul_mod(q1_c.w, q2_c.x, q), mul_mod(q1_c.x, q2_c.w, q), q), mul_mod(q1_c.y, q2_c.z, q), q), sub_mod(0, mul_mod(q1_c.z, q2_c.y, q),q), q);
+                    let y = add_mod(add_mod(sub_mod(mul_mod(q1_c.w, q2_c.y, q), mul_mod(q1_c.x, q2_c.z, q),q), mul_mod(q1_c.y, q2_c.w, q), q), mul_mod(q1_c.z, q2_c.x, q), q);
+                    let z = add_mod(add_mod(add_mod(mul_mod(q1_c.w, q2_c.z, q), mul_mod(q1_c.x, q2_c.y, q), q), sub_mod(0, mul_mod(q1_c.y, q2_c.x, q),q), q), mul_mod(q1_c.z, q2_c.w, q), q);
+                    let product = Quaternion { w, x, y, z };
+                    
+                    // 순환 구조 처리 (모듈러 연산)
+                    let target_index = i + j;
+                    if target_index < n {
+                        result_coeffs[target_index].w = add_mod(result_coeffs[target_index].w, product.w, q);
+                        result_coeffs[target_index].x = add_mod(result_coeffs[target_index].x, product.x, q);
+                        result_coeffs[target_index].y = add_mod(result_coeffs[target_index].y, product.y, q);
+                        result_coeffs[target_index].z = add_mod(result_coeffs[target_index].z, product.z, q);
                     } else {
-                        result_coeffs[i + j - n] = result_coeffs[i + j - n].sub(product);
+                        result_coeffs[target_index - n].w = sub_mod(result_coeffs[target_index - n].w, product.w,q);
+                        result_coeffs[target_index - n].x = sub_mod(result_coeffs[target_index - n].x, product.x,q);
+                        result_coeffs[target_index - n].y = sub_mod(result_coeffs[target_index - n].y, product.y,q);
+                        result_coeffs[target_index - n].z = sub_mod(result_coeffs[target_index - n].z, product.z,q);
                     }
                 }
-            }
-            for coeff in &mut result_coeffs {
-                coeff.w %= q; coeff.x %= q; coeff.y %= q; coeff.z %= q;
             }
             return Polynomial { coeffs: result_coeffs };
         }
@@ -178,38 +196,39 @@ impl HardwareBackend for CpuBackend {
         let p2_low = Polynomial { coeffs: p2.coeffs[0..m].to_vec() };
         let p2_high = Polynomial { coeffs: p2.coeffs[m..n].to_vec() };
         
-        // 분할된 다항식에 맞는 새로운 파라미터 생성
         let mut sub_params = params.clone();
         sub_params.polynomial_degree = m;
 
-        // 2. 재귀 호출을 통한 3개의 곱셈
-        // z2 = high * high
+        // 2. 재귀 호출 (3번의 곱셈)
         let z2 = self.polynomial_mul(&p1_high, &p2_high, &sub_params);
-        // z0 = low * low
         let z0 = self.polynomial_mul(&p1_low, &p2_low, &sub_params);
         
-        // z1 = (low+high) * (low+high) - z2 - z0
         let p1_sum = self.polynomial_add(&p1_low, &p1_high, &sub_params);
         let p2_sum = self.polynomial_add(&p2_low, &p2_high, &sub_params);
         let z1_intermediate = self.polynomial_mul(&p1_sum, &p2_sum, &sub_params);
         let z1 = self.polynomial_sub(&self.polynomial_sub(&z1_intermediate, &z2, &sub_params), &z0, &sub_params);
 
-        // 3. 결과 조합
+        // 3. 결과 조합 (모든 과정을 모듈러 연산 함수로만 처리)
         // Result = z2 * x^n + z1 * x^m + z0
-        let mut result_coeffs = vec![Quaternion::zero(); n * 2]; // 임시로 두 배 크기 할당
-        for i in 0..n { result_coeffs[i] = z0.coeffs.get(i).cloned().unwrap_or_default(); }
-        for i in 0..n { result_coeffs[i + m] = self.polynomial_add(&Polynomial{coeffs: vec![result_coeffs[i+m]]}, &Polynomial{coeffs: vec![z1.coeffs.get(i).cloned().unwrap_or_default()]}, params).coeffs[0];}
-        for i in 0..n { result_coeffs[i + n] = self.polynomial_add(&Polynomial{coeffs: vec![result_coeffs[i+n]]}, &Polynomial{coeffs: vec![z2.coeffs.get(i).cloned().unwrap_or_default()]}, params).coeffs[0];}
-
-        // 최종적으로 n차 다항식으로 변환 (x^n = -1 적용)
-        let mut final_coeffs = vec![Quaternion::zero(); n];
-        for i in 0..n {
-            let term1 = result_coeffs[i];
-            let term2 = result_coeffs[i+n];
-            final_coeffs[i] = self.polynomial_sub(&Polynomial{coeffs: vec![term1]}, &Polynomial{coeffs: vec![term2]}, params).coeffs[0];
+        let mut result_poly = Polynomial::zero(n);
+        
+        // z0 부분 더하기
+        for i in 0..m { result_poly.coeffs[i] = z0.coeffs[i]; }
+        
+        // z1 부분 더하기
+        for i in 0..m {
+            result_poly.coeffs[i+m] = self.polynomial_add(&Polynomial{coeffs: vec![result_poly.coeffs[i+m]]}, &Polynomial{coeffs: vec![z1.coeffs[i]]}, params).coeffs[0];
         }
 
-        Polynomial { coeffs: final_coeffs }
+        // z2 부분 더하기
+        for i in 0..m {
+            // (z2 * x^n)은 x^n = -1 이므로, (-z2)를 더하는 것과 같음
+            // 따라서 z2_shifted[i] = -z2.coeffs[i]가 됨
+            let z2_term = self.polynomial_sub(&Polynomial::zero(1), &Polynomial{coeffs: vec![z2.coeffs[i]]}, params).coeffs[0];
+            result_poly.coeffs[i] = self.polynomial_add(&Polynomial{coeffs: vec![result_poly.coeffs[i]]}, &Polynomial{coeffs: vec![z2_term]}, params).coeffs[0];
+        }
+
+        result_poly
     }
 
     fn homomorphic_mul(&self, ct1: &Ciphertext, ct2: &Ciphertext, rlk: &RelinearizationKey, params: &QfheParameters) -> Ciphertext {
