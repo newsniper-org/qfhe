@@ -26,7 +26,9 @@ pub struct QfheParameters {
     pub plaintext_modulus: u128,
     pub scaling_factor_delta: u128,
     pub noise_std_dev: f64,
-    pub module_dimension_k: usize
+    pub module_dimension_k: usize,
+    pub gadget_base_b: u128,
+    pub gadget_levels_l: usize,
 }
 
 impl SecurityLevel {
@@ -44,6 +46,8 @@ impl SecurityLevel {
                 plaintext_modulus: 1 << 32,
                 scaling_factor_delta: 1152921504606846883 / (1 << 32),
                 noise_std_dev: 3.2,
+                gadget_base_b: 1 << 8,
+                gadget_levels_l: 8, // 8 levels * 8 bits = 64 bits coverage
             },
             // ~160-bit quantum security (Intermediate)
             SecurityLevel::L160 => QfheParameters {
@@ -54,6 +58,8 @@ impl SecurityLevel {
                 plaintext_modulus: 1 << 32,
                 scaling_factor_delta: 1180591620717411303423 / (1 << 32),
                 noise_std_dev: 3.2,
+                gadget_base_b: 1 << 8,
+                gadget_levels_l: 9, // 9 levels * 8 bits = 72 bits coverage
             },
             // 192-bit quantum security (NIST Level 3)
             SecurityLevel::L192 => QfheParameters {
@@ -64,6 +70,8 @@ impl SecurityLevel {
                 plaintext_modulus: 1 << 32,
                 scaling_factor_delta: 1180591620717411303423 / (1 << 32),
                 noise_std_dev: 3.2,
+                gadget_base_b: 1 << 8,
+                gadget_levels_l: 9, // 9 levels * 8 bits = 72 bits coverage
             },
             // ~224-bit quantum security (Intermediate)
             SecurityLevel::L224 => QfheParameters {
@@ -75,6 +83,8 @@ impl SecurityLevel {
                 plaintext_modulus: 1 << 64,
                 scaling_factor_delta: 340282366920938463463374607431768211293 / (1 << 64),
                 noise_std_dev: 3.2,
+                gadget_base_b: 1 << 8,
+                gadget_levels_l: 16, // 16 levels * 8 bits = 128 bits coverage
             },
             // 256-bit quantum security (NIST Level 5)
             SecurityLevel::L256 => QfheParameters {
@@ -86,6 +96,8 @@ impl SecurityLevel {
                 plaintext_modulus: 1 << 64,
                 scaling_factor_delta: 340282366920938463463374607431768211293 / (1 << 64),
                 noise_std_dev: 3.2,
+                gadget_base_b: 1 << 8,
+                gadget_levels_l: 16, // 16 levels * 8 bits = 128 bits coverage
             },
         }
     }
@@ -99,6 +111,12 @@ impl SecurityLevel {
 pub struct Ciphertext {
     pub a_vec: Vec<Polynomial>, // k개의 다항식 벡터
     pub b: Polynomial,          // 1개의 다항식
+}
+
+/// GGSW 암호문은 부트스트래핑의 핵심 요소입니다.
+#[derive(Clone, Debug)]
+pub struct GgswCiphertext {
+    pub levels: Vec<Ciphertext>,
 }
 
 /// 암호화, 복호화, 동형 연산을 위한 핵심 트레이트(trait)입니다.

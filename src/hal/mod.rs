@@ -1,6 +1,6 @@
 // src/hal/mod.rs
 
-use crate::core::{Ciphertext, Polynomial, SecretKey, QfheParameters, RelinearizationKey};
+use crate::core::{Ciphertext, Polynomial, SecretKey, QfheParameters, RelinearizationKey, KeySwitchingKey, BootstrapKey, };
 
 pub trait HardwareBackend {
     fn encrypt(&self, message: u64, params: &QfheParameters, secret_key: &SecretKey) -> Ciphertext;
@@ -17,7 +17,8 @@ pub trait HardwareBackend {
     fn generate_keyswitching_key(&self, old_key: &SecretKey, new_key: &SecretKey, params: &QfheParameters) -> KeySwitchingKey;
     fn generate_bootstrap_key(&self, secret_key: &SecretKey, params: &QfheParameters) -> BootstrapKey;
     fn bootstrap(&self, ct: &Ciphertext, test_poly: &Polynomial, bsk: &BootstrapKey, ksk: &KeySwitchingKey, params: &QfheParameters) -> Ciphertext;
-    
+    fn keyswitch(&self, ct: &Ciphertext, ksk: &KeySwitchingKey, params: &QfheParameters) -> Ciphertext;
+
     fn modulus_switch(&self, ct: &Ciphertext, params: &QfheParameters) -> Ciphertext;
 }
 

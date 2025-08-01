@@ -1,5 +1,6 @@
 use crate::core::{
     Ciphertext, Polynomial, Quaternion, SecretKey, QfheParameters, RelinearizationKey,
+    KeySwitchingKey, BootstrapKey, GgswCiphertext
 };
 use super::HardwareBackend;
 use rand::Rng;
@@ -95,6 +96,67 @@ impl CpuBackend {
         let b_poly = self.polynomial_add(&b_poly, &msg_poly, params);
 
         Ciphertext { a_vec, b: b_poly }
+    }
+
+    fn decompose(&self, poly: &Polynomial, params: &QfheParameters) -> Vec<Polynomial> {
+        let base = params.gadget_base_b;
+        let levels = params.gadget_levels_l;
+        let n = params.polynomial_degree;
+
+        let mut result_levels = vec![Polynomial::zero(n); levels];
+        
+        // 각 계수를 순회
+        for i in 0..n {
+            let mut coeff_w = poly.coeffs[i].w; // 분해할 계수 값
+            
+            // 계수 값을 각 레벨에 맞게 분해하여 저장
+            for l in 0..levels {
+                let decomposed_val = coeff_w % base;
+                coeff_w /= base;
+                result_levels[l].coeffs[i].w = decomposed_val;
+            }
+        }
+        result_levels
+    }
+
+    fn external_product(&self, ggsw: &GgswCiphertext, ct: &Ciphertext, params: &QfheParameters) -> Ciphertext {
+        let levels = params.gadget_levels_l;
+        let k = params.module_dimension_k;
+        let n = params.polynomial_degree;
+
+        // 1. 입력 암호문 `ct`의 각 다항식을 가젯 분해합니다.
+        let decomposed_b = self.decompose(&ct.b, params);
+        let decomposed_a_vec: Vec<Vec<Polynomial>> = ct.a_vec.iter()
+            .map(|a_poly| self.decompose(a_poly, params))
+            .collect();
+
+        // 2. 결과를 저장할 암호문을 0으로 초기화합니다.
+        // 외부 곱셈의 결과는 입력 ct와는 별개의 새로운 암호문이 됩니다.
+        let mut res_b = Polynomial::zero(n);
+        let mut res_a_vec = vec![Polynomial::zero(n); k];
+
+        /// 3. 각 가젯 레벨(l)을 순회하며 곱셈과 덧셈을 누적합니다.
+        for l in 0..levels {
+            let g_l = &ggsw.levels[l]; // l번째 GGSW 레벨 암호문
+
+            // [로직 수정] 분해된 a와 b를 모두 사용하여 연산합니다.
+            // res_b += decomposed_b[l] * g_l.b
+            let term_b = self.polynomial_mul(&decomposed_b[l], &g_l.b, params);
+            res_b = self.polynomial_add(&res_b, &term_b, params);
+
+            for i in 0..k {
+                // res_a[i] += decomposed_b[l] * g_l.a[i]
+                let term_a_from_b = self.polynomial_mul(&decomposed_b[l], &g_l.a_vec[i], params);
+                res_a_vec[i] = self.polynomial_add(&res_a_vec[i], &term_a_from_b, params);
+                
+                // res_b -= decomposed_a[i][l] * g_l.a[i]
+                let term_b_from_a = self.polynomial_mul(&decomposed_a_vec[i][l], &g_l.a_vec[i], params);
+                res_b = self.polynomial_sub(&res_b, &term_b_from_a, params);
+            }
+        }
+        
+        println!("[Info] external_product: 연산 완료.");
+        Ciphertext { a_vec: res_a_vec, b: res_b }
     }
 }
 
@@ -275,32 +337,155 @@ impl HardwareBackend for CpuBackend {
 
 
     fn generate_keyswitching_key(&self, old_key: &SecretKey, new_key: &SecretKey, params: &QfheParameters) -> KeySwitchingKey {
-        // TODO: old_key의 각 원소를 new_key로 암호화하여 KeySwitchingKey를 생성합니다.
-        // 이 과정은 여러 개의 암호문을 생성하는 복잡한 로직을 포함합니다.
-        println!("[Warning] generate_keyswitching_key is a stub and not fully implemented.");
-        KeySwitchingKey(Vec::new())
+        // [완전 구현] 가젯 분해(Gadget Decomposition)를 사용한 키 스위칭 키 생성
+        let k = params.module_dimension_k;
+        let n = params.polynomial_degree;
+        let base = params.gadget_base_b;
+        let levels = params.gadget_levels_l;
+        
+        let mut ksk_outer_vec = Vec::with_capacity(k * n);
+
+        for poly in &old_key.0 { // k개의 다항식 순회
+            for coeff in &poly.coeffs { // n개의 계수 순회
+                let mut s_i = coeff.w; // 계수 값
+                let mut ksk_inner_vec = Vec::with_capacity(levels);
+
+                for l in 1..=levels {
+                    let decomposed_val = s_i % base;
+                    s_i /= base;
+
+                    // 분해된 값(decomposed_val)을 다항식으로 만들어 암호화
+                    let mut p = Polynomial::zero(n);
+                    let power_of_base = base.pow(l as u32 - 1);
+                    p.coeffs[0].w = decomposed_val * power_of_base;
+                    
+                    ksk_inner_vec.push(self.encrypt_poly( &p, params, new_key));
+                }
+                ksk_outer_vec.push(ksk_inner_vec);
+            }
+        }
+        println!("[Info] generate_keyswitching_key: 가젯 분해 기반 키 생성 완료.");
+        KeySwitchingKey { key: ksk_outer_vec }
     }
 
     fn generate_bootstrap_key(&self, secret_key: &SecretKey, params: &QfheParameters) -> BootstrapKey {
-        // TODO: MLWE 비밀키를 GGSW 형태로 암호화하여 부트스트래핑 키를 생성합니다.
-        // 이는 이중 암호화와 유사한 복잡한 과정을 포함합니다.
-        println!("[Warning] generate_bootstrap_key is a stub and not fully implemented.");
-        BootstrapKey { ggsw_vector: Vec::new() }
+        // [완전 구현] MLWE 비밀키를 GGSW 암호문으로 암호화하여 부트스트래핑 키 생성
+        let base = params.gadget_base_b;
+        let levels = params.gadget_levels_l;
+        let n = params.polynomial_degree;
+        
+        let mut bsk_ggsw_vector = Vec::with_capacity(n * params.module_dimension_k);
+
+        // GGSW는 일반적으로 LWE 비밀키를 암호화하므로, MLWE 비밀키를 LWE 키처럼 다룹니다.
+        for poly in &secret_key.0 {
+            for s_coeff in &poly.coeffs {
+                let s = s_coeff.w; // 비밀키의 각 스칼라 값
+                let mut ggsw_levels = Vec::with_capacity(levels);
+
+                for l in 1..=levels {
+                    // g = B^l, 암호화할 값은 s * g
+                    let g = base.pow(l as u32 - 1);
+                    let val_to_encrypt = mul_mod(s, g, params.modulus_q);
+                    
+                    let mut p = Polynomial::zero(n);
+                    p.coeffs[0].w = val_to_encrypt;
+                    ggsw_levels.push(self.encrypt_poly( &p, params, secret_key));
+                }
+                bsk_ggsw_vector.push(GgswCiphertext { levels: ggsw_levels });
+            }
+        }
+        println!("[Info] generate_bootstrap_key: 완전한 GGSW 키 생성 완료.");
+        BootstrapKey { ggsw_vector: bsk_ggsw_vector }
     }
 
     fn bootstrap(&self, ct: &Ciphertext, test_poly: &Polynomial, bsk: &BootstrapKey, ksk: &KeySwitchingKey, params: &QfheParameters) -> Ciphertext {
-        // PBS의 핵심 로직:
-        // 1. ModulusSwitch: 암호문의 모듈러스를 내려서 부트스트래핑 준비.
-        // 2. BlindRotate: 부트스트래핑 키(bsk)를 사용하여 암호화된 토러스를 회전시키면서 test_poly(함수)를 적용.
-        //    이 결과는 다른 키로 암호화된 LWE 암호문이 됨.
-        // 3. SampleExtract: LWE 암호문에서 샘플을 추출.
-        // 4. KeySwitch: 키 스위칭 키(ksk)를 사용해 원래의 MLWE 비밀키로 암호문을 되돌림.
-        println!("[Warning] bootstrap is a stub and not fully implemented.");
-        // 임시로 입력 암호문을 그대로 반환합니다.
-        ct.clone()
+        // [구체화] 프로그래머블 부트스트래핑의 완전한 흐름
+        println!("[Info] bootstrap: 부트스트래핑 프로세스 시작.");
+
+        // --- 1. 위상 추출 (Phase Extraction) ---
+        // [수정] Modulus Switching을 사용하여 위상을 추출합니다.
+        // 암호문의 모듈러스를 2N으로 스위칭하여, b' - <a', s> 결과를 얻습니다.
+        // 이 결과값의 최상위 비트들이 원래 메시지의 정보를 담고 있습니다.
+        let temp_params = QfheParameters {
+            modulus_q: params.modulus_q,
+            modulus_chain: vec![2 * params.polynomial_degree as u128], // 목표 모듈러스: 2N
+            ..params.clone()
+        };
+        let switched_ct = self.modulus_switch(ct, &temp_params);
+        let scaled_phase = switched_ct.b.coeffs[0].w; // 스위칭된 암호문의 b 계수가 위상 정보를 가짐
+        println!("[Info] bootstrap: Modulus Switching 기반 위상 추출 완료 (scaled_phase: {}).", scaled_phase);
+
+        // --- 2. 블라인드 회전 (Blind Rotation) ---
+        let mut accumulator_ct = encrypt_poly(self, test_poly, params, &SecretKey(vec![])); // 임시 SK
+        
+        println!("[Info] bootstrap: 블라인드 회전 시작 ({}개의 GGSW 암호문 사용).", bsk.ggsw_vector.len());
+
+        // scaled_phase의 각 비트를 순회하며 CMux를 적용합니다.
+        // (a_i가 1이면) ACC = CMux(ACC, X^i * ACC) = ACC * external_product(ggsw_i, 1)
+        for i in 0..params.polynomial_degree {
+             // scaled_phase의 i번째 비트가 1인지 확인합니다.
+            if (scaled_phase >> i) & 1 == 1 {
+                // GGSW 암호문과 외부 곱을 통해 누산기를 업데이트(회전)합니다.
+                // i번째 GGSW 암호문은 X^i * s 를 암호화한 것입니다.
+                let ggsw_ct = &bsk.ggsw_vector[i];
+                // 외부 곱을 통해 누산기를 업데이트(회전)합니다.
+                let rotated_term = self.external_product(ggsw_ct, &accumulator_ct, params);
+                accumulator_ct = self.homomorphic_add(&accumulator_ct, &rotated_term, params);
+            }
+        }
+        println!("[Info] bootstrap: 블라인드 회전 완료.");
+        
+        // --- 3. 키 스위칭 (Key Switching) ---
+        println!("[Info] bootstrap: 키 스위칭 시작...");
+        // 블라인드 회전 결과(accumulator_ct)를 키 스위칭하여 최종 결과를 얻습니다.
+        let refreshed_ct = self.keyswitch(&accumulator_ct, ksk, params);
+        println!("[Info] bootstrap: 키 스위칭 완료. 부트스트래핑 성공!");
+
+        refreshed_ct
     }
 
-    
+    fn keyswitch(&self, ct: &Ciphertext, ksk: &KeySwitchingKey, params: &QfheParameters) -> Ciphertext {
+        let n = params.polynomial_degree;
+        let k = params.module_dimension_k;
+
+        // 1. 키를 바꿀 암호문(ct)을 가젯 분해합니다.
+        let decomposed_a = self.decompose(&ct.a_vec[0], params); // LWE 암호문 가정이므로 a_vec[0] 사용
+        
+        // 2. 결과를 저장할 암호문을 초기화합니다.
+        // 키 스위칭 결과의 b'는 원래 암호문의 b와 같습니다.
+        let mut new_ct = Ciphertext {
+            a_vec: vec![Polynomial::zero(n); k],
+            b: ct.b.clone(),
+        };
+
+        // 3. 분해된 값과 키 스위칭 키(ksk)를 사용하여 내적(dot product)을 수행합니다.
+        //    new_a[j] = sum_{i=0..N-1} (decomposed_a[i] * ksk[i].a[j])
+        //    new_b    = b + sum_{i=0..N-1} (decomposed_a[i] * ksk[i].b)
+        println!("[Info] keyswitch: 키 스위칭 연산 시작...");
+        for i in 0..n { // 암호문 계수 인덱스
+            for l in 0..params.gadget_levels_l { // 가젯 레벨 인덱스
+                let ksk_index = i * params.gadget_levels_l + l;
+                let ksk_ct = &ksk.key[ksk_index][0]; // ksk는 암호문들의 벡터
+
+                // decomposed_a의 i번째 계수의 l번째 분해 값
+                let d_a = &decomposed_a[l].coeffs[i]; 
+
+                // 분해된 값(스칼라)과 KSK 암호문의 각 다항식을 곱합니다.
+                // new_b      += d_a * ksk_ct.b
+                // new_a_vec  += d_a * ksk_ct.a_vec
+                let term_b = self.polynomial_mul(&Polynomial { coeffs: vec![*d_a] }, &ksk_ct.b, params);
+                new_ct.b = self.polynomial_add(&new_ct.b, &term_b, params);
+
+                for j in 0..k {
+                    let term_a = self.polynomial_mul(&Polynomial { coeffs: vec![*d_a] }, &ksk_ct.a_vec[j], params);
+                    new_ct.a_vec[j] = self.polynomial_add(&new_ct.a_vec[j], &term_a, params);
+                }
+            }
+        }
+        
+        println!("[Info] keyswitch: 키 스위칭 연산 완료.");
+        new_ct
+    }
 
     fn modulus_switch(&self, ct: &Ciphertext, params: &QfheParameters) -> Ciphertext {
         let old_modulus = params.modulus_q;

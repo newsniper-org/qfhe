@@ -1,5 +1,6 @@
 use crate::core::{
     Ciphertext, QfheEngine, Polynomial, Quaternion, SecretKey, SecurityLevel, QfheParameters, RelinearizationKey,
+    KeySwitchingKey, BootstrapKey, 
 };
 use crate::hal::{CpuBackend, HardwareBackend};
 use rand::Rng;
@@ -37,6 +38,10 @@ impl QfheEngine for QfheContext {
 
     fn bootstrap(&self, ct: &Ciphertext, test_poly: &Polynomial) -> Ciphertext {
         self.backend.bootstrap(ct, test_poly, &self.bootstrap_key, &self.keyswitching_key, &self.params)
+    }
+
+    fn modulus_switch(&self, ct: &Ciphertext) -> Ciphertext {
+        self.backend.modulus_switch(ct, &self.params)        
     }
 }
 
