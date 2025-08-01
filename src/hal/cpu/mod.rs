@@ -299,4 +299,37 @@ impl HardwareBackend for CpuBackend {
         // 임시로 입력 암호문을 그대로 반환합니다.
         ct.clone()
     }
+
+    
+
+    fn modulus_switch(&self, ct: &Ciphertext, params: &QfheParameters) -> Ciphertext {
+        let old_modulus = params.modulus_q;
+        // 체인의 다음 모듈러스를 가져옵니다 (여기서는 간단히 마지막 것을 사용).
+        let new_modulus = *params.modulus_chain.last().unwrap_or(&old_modulus);
+
+        if new_modulus >= old_modulus {
+            return ct.clone(); // 스위칭할 필요 없음
+        }
+
+        let scale = |val: u128| -> u128 {
+            // (val * new_modulus) / old_modulus, 정수 연산으로 근사
+            // BigUint 라이브러리를 사용하면 더 정확한 연산이 가능합니다.
+            let scaled = (val as u128 * new_modulus) / old_modulus;
+            let error = val - (scaled * old_modulus) / new_modulus;
+            // 반올림을 위해 에러를 더해줍니다.
+            scaled + (error * 2 / old_modulus)
+        };
+
+        let switch_poly = |poly: &Polynomial| -> Polynomial {
+            let new_coeffs = poly.coeffs.iter().map(|q| Quaternion {
+                w: scale(q.w), x: scale(q.x), y: scale(q.y), z: scale(q.z),
+            }).collect();
+            Polynomial { coeffs: new_coeffs }
+        };
+
+        let new_a_vec = ct.a_vec.iter().map(switch_poly).collect();
+        let new_b = switch_poly(&ct.b);
+
+        Ciphertext { a_vec: new_a_vec, b: new_b }
+    }
 }

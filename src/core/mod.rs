@@ -22,6 +22,7 @@ pub enum SecurityLevel {
 pub struct QfheParameters {
     pub polynomial_degree: usize,
     pub modulus_q: u128,
+    pub modulus_chain: Vec<u128>,
     pub plaintext_modulus: u128,
     pub scaling_factor_delta: u128,
     pub noise_std_dev: f64,
@@ -38,6 +39,8 @@ impl SecurityLevel {
                 module_dimension_k: 2,
                 polynomial_degree: 1024,
                 modulus_q: 1152921504606846883, // ~60-bit prime
+                // 모듈러스 체인 추가 (예: 50-bit, 40-bit primes)
+                modulus_chain: vec![1125899906842597, 1099511627749],
                 plaintext_modulus: 1 << 32,
                 scaling_factor_delta: 1152921504606846883 / (1 << 32),
                 noise_std_dev: 3.2,
@@ -47,6 +50,7 @@ impl SecurityLevel {
                 module_dimension_k: 2,
                 polynomial_degree: 1024,
                 modulus_q: 1180591620717411303423, // ~70-bit prime
+                modulus_chain: vec![1152921504606846883, 1125899906842597], // ~60-bit, 50-bit primes
                 plaintext_modulus: 1 << 32,
                 scaling_factor_delta: 1180591620717411303423 / (1 << 32),
                 noise_std_dev: 3.2,
@@ -56,6 +60,7 @@ impl SecurityLevel {
                 module_dimension_k: 3,
                 polynomial_degree: 1024,
                 modulus_q: 1180591620717411303423, // ~70-bit prime
+                modulus_chain: vec![1152921504606846883, 1125899906842597], // ~60-bit, 50-bit primes
                 plaintext_modulus: 1 << 32,
                 scaling_factor_delta: 1180591620717411303423 / (1 << 32),
                 noise_std_dev: 3.2,
@@ -65,6 +70,8 @@ impl SecurityLevel {
                 module_dimension_k: 3,
                 polynomial_degree: 2048,
                 modulus_q: 340282366920938463463374607431768211293, // 125-bit prime
+                modulus_chain: vec![340282366920938463463374607431768210431, // ~128-bit
+                                    170141183460469231731687303715884105727], // ~127-bit
                 plaintext_modulus: 1 << 64,
                 scaling_factor_delta: 340282366920938463463374607431768211293 / (1 << 64),
                 noise_std_dev: 3.2,
@@ -74,6 +81,8 @@ impl SecurityLevel {
                 module_dimension_k: 4,
                 polynomial_degree: 2048,
                 modulus_q: 340282366920938463463374607431768211293, // 125-bit prime
+                modulus_chain: vec![340282366920938463463374607431768210431, // ~128-bit
+                                    170141183460469231731687303715884105727], // ~127-bit
                 plaintext_modulus: 1 << 64,
                 scaling_factor_delta: 340282366920938463463374607431768211293 / (1 << 64),
                 noise_std_dev: 3.2,
@@ -98,7 +107,9 @@ pub trait QfheEngine {
     fn decrypt(&self, ciphertext: &Ciphertext) -> u64;
     fn homomorphic_add(&self, ct1: &Ciphertext, ct2: &Ciphertext) -> Ciphertext;
     fn homomorphic_sub(&self, ct1: &Ciphertext, ct2: &Ciphertext) -> Ciphertext;
-    
+
     fn homomorphic_mul(&self, ct1: &Ciphertext, ct2: &Ciphertext) -> Ciphertext;
     fn bootstrap(&self, ct: &Ciphertext, test_poly: &Polynomial) -> Ciphertext;
+
+    fn modulus_switch(&self, ct: &Ciphertext) -> Ciphertext;
 }
