@@ -21,7 +21,7 @@ mod tests {
     fn test_encryption_decryption_large_numbers() {
         println!("--- 64비트 암호화/복호화 정확성 테스트 시작 ---");
         
-        let context_ptr = qfhe_context_create(crate::core::SecurityLevel::L128);
+        let context_ptr = unsafe { qfhe_context_create(crate::core::SecurityLevel::L128) };
         let context = unsafe { &*(context_ptr as *mut QfheContext) };
         println!("테스트 컨텍스트 생성 완료.");
 
@@ -37,7 +37,7 @@ mod tests {
             println!("메시지 {} 검증 성공!", message);
         }
         
-        qfhe_context_destroy(context_ptr);
+        unsafe { qfhe_context_destroy(context_ptr) };
         println!("--- 64비트 암호화/복호화 정확성 테스트 종료 ---\n");
     }
 
@@ -45,7 +45,7 @@ mod tests {
     fn test_homomorphic_addition_large_numbers() {
         println!("--- 64비트 동형 덧셈 정확성 테스트 시작 ---");
 
-        let context_ptr = qfhe_context_create(crate::core::SecurityLevel::L128);
+        let context_ptr = unsafe { qfhe_context_create(crate::core::SecurityLevel::L128) };
         let context = unsafe { &*(context_ptr as *mut QfheContext) };
         println!("테스트 컨텍스트 생성 완료.");
 
@@ -68,7 +68,37 @@ mod tests {
         assert_eq!(expected_sum, decrypted_sum, "동형 덧셈 실패!");
         println!("동형 덧셈 검증 성공!");
 
-        qfhe_context_destroy(context_ptr);
+        unsafe { qfhe_context_destroy(context_ptr) };
         println!("--- 64비트 동형 덧셈 정확성 테스트 종료 ---");
+    }
+
+    #[test]
+    fn test_homomorphic_subtraction_large_numbers() {
+        println!("--- 64비트 동형 뺄셈 정확성 테스트 시작 ---");
+
+        let context_ptr = unsafe { qfhe_context_create(crate::core::SecurityLevel::L128) };
+        let context = unsafe { &*(context_ptr as *mut QfheContext) };
+        println!("테스트 컨텍스트 생성 완료.");
+
+        let msg1: u64 = 100;
+        let msg2: u64 = 42;
+        let expected_sub = msg1 - msg2;
+        println!("메시지 1: {}, 메시지 2: {}. 예상 결과: {}", msg1, msg2, expected_sub);
+
+        let ct1 = context.encrypt(msg1);
+        let ct2 = context.encrypt(msg2);
+        println!("두 메시지 암호화 완료.");
+
+        let ct_sub = context.homomorphic_sub(&ct1, &ct2);
+        println!("동형 뺄셈 완료.");
+
+        let decrypted_sub = context.decrypt(&ct_sub);
+        println!("결과 암호문 복호화 완료. 복호화된 차: {}", decrypted_sub);
+
+        assert_eq!(expected_sub, decrypted_sub, "동형 뺄셈 실패!");
+        println!("동형 뺄셈 검증 성공!");
+
+        unsafe { qfhe_context_destroy(context_ptr) };
+        println!("--- 64비트 동형 뺄셈 정확성 테스트 종료 ---");
     }
 }

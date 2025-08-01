@@ -1,8 +1,8 @@
-use std::ops::{Add, Sub, Mul};
+use std::ops::{Add, Sub, Mul, Rem};
 
 // QFHE의 기본 연산을 위한 4원수(Quaternion)를 정의합니다.
 // SIMD 연산에 최적화될 수 있는 구조입니다. [8, 9]
-#[derive(Clone, Debug, Copy, Default)]
+#[derive(Clone, Debug, Copy)]
 pub struct Quaternion {
     pub w: u128,
     pub x: u128,
@@ -18,7 +18,12 @@ impl Quaternion {
     }
 
     pub fn zero() -> Self {
-        Self::default()
+        Self {
+            w: 0,
+            x: 0,
+            y: 0,
+            z: 0
+        }
     }
 
     // u128 스칼라 값으로부터 4원수를 생성합니다.
@@ -61,6 +66,15 @@ impl Quaternion {
             z: (self.z * scalar),
         }
     }
+
+    pub fn rem(self, rhs: u128) -> Self {
+        Self {
+            w: (self.w % rhs),
+            x: (self.x % rhs),
+            y: (self.y % rhs),
+            z: (self.z % rhs),
+        }
+    }
 }
 
 impl Mul for Quaternion {
@@ -86,3 +100,18 @@ impl Sub for Quaternion {
         Self::sub(self, rhs)
     }
 }
+
+impl Rem<u128> for Quaternion {
+    type Output = Self;
+
+    fn rem(self, rhs: u128) -> Self::Output {
+        Self::rem(self,rhs)
+    }
+}
+
+impl Default for Quaternion {
+    fn default() -> Self {
+        Self::zero()
+    }
+}
+

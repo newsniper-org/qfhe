@@ -1,5 +1,5 @@
 use crate::core::{
-    Ciphertext, QfheEngine, Polynomial, Quaternion, SecretKey, SecurityLevel, QfheParameters
+    Ciphertext, QfheEngine, Polynomial, Quaternion, SecretKey, SecurityLevel, QfheParameters, RelinearizationKey,
 };
 use crate::hal::{CpuBackend, HardwareBackend};
 use rand::Rng;
@@ -8,6 +8,7 @@ use rand::Rng;
 pub struct QfheContext {
     backend: Box<dyn HardwareBackend>,
     secret_key: SecretKey,
+    relinearization_key: RelinearizationKey,
     params: QfheParameters,
 }
 
@@ -26,6 +27,10 @@ impl QfheEngine for QfheContext {
     
     fn homomorphic_sub(&self, ct1: &Ciphertext, ct2: &Ciphertext) -> Ciphertext {
         self.backend.homomorphic_sub(ct1, ct2, &self.params)
+    }
+
+    fn homomorphic_mul(&self, ct1: &Ciphertext, ct2: &Ciphertext) -> Ciphertext {
+        self.backend.homomorphic_mul(ct1, ct2, &self.relinearization_key, &self.params)
     }
 }
 
@@ -50,9 +55,14 @@ pub unsafe extern "C" fn qfhe_context_create(level: SecurityLevel) -> *mut QfheC
 
     let secret_key = SecretKey(secret_key_vec);
     
+    let backend = Box::new(CpuBackend);
+    // 재선형화 키 생성
+    let relinearization_key = backend.generate_relinearization_key(&secret_key, &params);
+    
     let context = Box::new(QfheContext { 
-        backend: Box::new(CpuBackend),
+        backend,
         secret_key,
+        relinearization_key,
         params,
     });
     Box::into_raw(context)
@@ -110,4 +120,17 @@ pub unsafe extern "C" fn qfhe_ciphertext_destroy(ciphertext_ptr: *mut Ciphertext
     if !ciphertext_ptr.is_null() {
         drop(unsafe { Box::from_raw(ciphertext_ptr) });
     }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qfhe_homomorphic_mul(
+    context_ptr: *mut QfheContext,
+    ct1_ptr: *mut Ciphertext,
+    ct2_ptr: *mut Ciphertext,
+) -> *mut Ciphertext {
+    let context = unsafe { &*context_ptr };
+    let ct1 = unsafe { &*ct1_ptr };
+    let ct2 = unsafe { &*ct2_ptr };
+    let result_ct = Box::new(context.homomorphic_mul(ct1, ct2));
+    Box::into_raw(result_ct)
 }

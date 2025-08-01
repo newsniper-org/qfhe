@@ -47,4 +47,8 @@ Ciphertext *qfhe_homomorphic_sub(QfheContext *context_ptr,
 
 void qfhe_ciphertext_destroy(Ciphertext *ciphertext_ptr);
 
+Ciphertext *qfhe_homomorphic_mul(QfheContext *context_ptr,
+                                 Ciphertext *ct1_ptr,
+                                 Ciphertext *ct2_ptr);
+
 #endif  /* QFHE_H */

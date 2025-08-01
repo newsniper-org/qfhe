@@ -1,5 +1,3 @@
-// demo/main.c
-
 #include <stdio.h>
 #include <stdint.h>
 #include "../include/qfhe.h"
@@ -22,26 +20,41 @@ void run_demo_for_level(SecurityLevel level, const char* level_name) {
     Ciphertext* ct2 = qfhe_encrypt(context, msg2);
     printf("3. 메시지 암호화 완료\n");
 
+    // 동형 덧셈
     Ciphertext* ct_sum = qfhe_homomorphic_add(context, ct1, ct2);
     printf("4. 동형 덧셈 완료\n");
 
+    // 동형 뺄셈
+    Ciphertext* ct_sub = qfhe_homomorphic_sub(context, ct1, ct2);
+    printf("5. 동형 뺄셈 완료\n");
+
     uint64_t decrypted_sum = qfhe_decrypt(context, ct_sum);
-    printf("5. 결과 복호화 완료\n");
+    uint64_t decrypted_sub = qfhe_decrypt(context, ct_sub);
+    printf("6. 결과 복호화 완료\n");
 
     printf("\n--- 검증 ---\n");
     uint64_t expected_sum = msg1 + msg2;
     printf("복호화된 합계: %llu (예상: %llu)\n", (unsigned long long)decrypted_sum, (unsigned long long)expected_sum);
     if (decrypted_sum == expected_sum) {
-        printf(" -> 검증 성공!\n");
+        printf(" -> 덧셈 검증 성공!\n");
     } else {
-        printf(" -> 검증 실패!\n");
+        printf(" -> 덧셈 검증 실패!\n");
+    }
+
+    uint64_t expected_sub = msg1 - msg2;
+    printf("복호화된 차: %llu (예상: %llu)\n", (unsigned long long)decrypted_sub, (unsigned long long)expected_sub);
+    if (decrypted_sub == expected_sub) {
+        printf(" -> 뺄셈 검증 성공!\n");
+    } else {
+        printf(" -> 뺄셈 검증 실패!\n");
     }
 
     qfhe_ciphertext_destroy(ct1);
     qfhe_ciphertext_destroy(ct2);
     qfhe_ciphertext_destroy(ct_sum);
+    qfhe_ciphertext_destroy(ct_sub); // ct_sub 메모리 해제 추가
     qfhe_context_destroy(context);
-    printf("6. 메모리 해제 완료\n");
+    printf("7. 메모리 해제 완료\n");
 }
 
 int main() {

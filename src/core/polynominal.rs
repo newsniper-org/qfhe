@@ -9,7 +9,7 @@ impl Polynomial {
     // 영 다항식을 생성합니다.
     pub fn zero(degree: usize) -> Self {
         Polynomial {
-            coeffs: vec![Quaternion::zero(); degree],
+            coeffs: vec![Quaternion::default(); degree],
         }
     }
 }

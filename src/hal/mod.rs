@@ -1,6 +1,6 @@
 // src/hal/mod.rs
 
-use crate::core::{Ciphertext, Polynomial, SecretKey, QfheParameters};
+use crate::core::{Ciphertext, Polynomial, SecretKey, QfheParameters, RelinearizationKey};
 
 pub trait HardwareBackend {
     fn encrypt(&self, message: u64, params: &QfheParameters, secret_key: &SecretKey) -> Ciphertext;
@@ -10,6 +10,9 @@ pub trait HardwareBackend {
     fn polynomial_add(&self, p1: &Polynomial, p2: &Polynomial, params: &QfheParameters) -> Polynomial;
     fn polynomial_sub(&self, p1: &Polynomial, p2: &Polynomial, params: &QfheParameters) -> Polynomial;
     fn polynomial_mul(&self, p1: &Polynomial, p2: &Polynomial, params: &QfheParameters) -> Polynomial;
+
+    fn generate_relinearization_key(&self, secret_key: &SecretKey, params: &QfheParameters) -> RelinearizationKey;
+    fn homomorphic_mul(&self, ct1: &Ciphertext, ct2: &Ciphertext, rlk: &RelinearizationKey, params: &QfheParameters) -> Ciphertext;
 }
 
 pub mod cpu;
