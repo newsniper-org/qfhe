@@ -5,7 +5,7 @@ pub mod polynominal;
 pub use crate::core::polynominal::Polynomial;
 
 pub mod keys;
-pub use crate::core::keys::{SecretKey, RelinearizationKey};
+pub use crate::core::keys::{SecretKey, RelinearizationKey, KeySwitchingKey, BootstrapKey};
 
 /// C FFI에서 사용할 보안 수준 열거형입니다.
 #[repr(C)]
@@ -98,5 +98,7 @@ pub trait QfheEngine {
     fn decrypt(&self, ciphertext: &Ciphertext) -> u64;
     fn homomorphic_add(&self, ct1: &Ciphertext, ct2: &Ciphertext) -> Ciphertext;
     fn homomorphic_sub(&self, ct1: &Ciphertext, ct2: &Ciphertext) -> Ciphertext;
+    
     fn homomorphic_mul(&self, ct1: &Ciphertext, ct2: &Ciphertext) -> Ciphertext;
+    fn bootstrap(&self, ct: &Ciphertext, test_poly: &Polynomial) -> Ciphertext;
 }

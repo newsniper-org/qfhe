@@ -271,4 +271,32 @@ impl HardwareBackend for CpuBackend {
 
         Ciphertext { a_vec: new_a_vec, b: new_b }
     }
+
+
+
+    fn generate_keyswitching_key(&self, old_key: &SecretKey, new_key: &SecretKey, params: &QfheParameters) -> KeySwitchingKey {
+        // TODO: old_key의 각 원소를 new_key로 암호화하여 KeySwitchingKey를 생성합니다.
+        // 이 과정은 여러 개의 암호문을 생성하는 복잡한 로직을 포함합니다.
+        println!("[Warning] generate_keyswitching_key is a stub and not fully implemented.");
+        KeySwitchingKey(Vec::new())
+    }
+
+    fn generate_bootstrap_key(&self, secret_key: &SecretKey, params: &QfheParameters) -> BootstrapKey {
+        // TODO: MLWE 비밀키를 GGSW 형태로 암호화하여 부트스트래핑 키를 생성합니다.
+        // 이는 이중 암호화와 유사한 복잡한 과정을 포함합니다.
+        println!("[Warning] generate_bootstrap_key is a stub and not fully implemented.");
+        BootstrapKey { ggsw_vector: Vec::new() }
+    }
+
+    fn bootstrap(&self, ct: &Ciphertext, test_poly: &Polynomial, bsk: &BootstrapKey, ksk: &KeySwitchingKey, params: &QfheParameters) -> Ciphertext {
+        // PBS의 핵심 로직:
+        // 1. ModulusSwitch: 암호문의 모듈러스를 내려서 부트스트래핑 준비.
+        // 2. BlindRotate: 부트스트래핑 키(bsk)를 사용하여 암호화된 토러스를 회전시키면서 test_poly(함수)를 적용.
+        //    이 결과는 다른 키로 암호화된 LWE 암호문이 됨.
+        // 3. SampleExtract: LWE 암호문에서 샘플을 추출.
+        // 4. KeySwitch: 키 스위칭 키(ksk)를 사용해 원래의 MLWE 비밀키로 암호문을 되돌림.
+        println!("[Warning] bootstrap is a stub and not fully implemented.");
+        // 임시로 입력 암호문을 그대로 반환합니다.
+        ct.clone()
+    }
 }

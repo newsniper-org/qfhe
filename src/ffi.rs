@@ -9,6 +9,8 @@ pub struct QfheContext {
     backend: Box<dyn HardwareBackend>,
     secret_key: SecretKey,
     relinearization_key: RelinearizationKey,
+    bootstrap_key: BootstrapKey,
+    keyswitching_key: KeySwitchingKey,
     params: QfheParameters,
 }
 
@@ -31,6 +33,10 @@ impl QfheEngine for QfheContext {
 
     fn homomorphic_mul(&self, ct1: &Ciphertext, ct2: &Ciphertext) -> Ciphertext {
         self.backend.homomorphic_mul(ct1, ct2, &self.relinearization_key, &self.params)
+    }
+
+    fn bootstrap(&self, ct: &Ciphertext, test_poly: &Polynomial) -> Ciphertext {
+        self.backend.bootstrap(ct, test_poly, &self.bootstrap_key, &self.keyswitching_key, &self.params)
     }
 }
 
@@ -58,11 +64,16 @@ pub unsafe extern "C" fn qfhe_context_create(level: SecurityLevel) -> *mut QfheC
     let backend = Box::new(CpuBackend);
     // 재선형화 키 생성
     let relinearization_key = backend.generate_relinearization_key(&secret_key, &params);
+
+    let bootstrap_key = backend.generate_bootstrap_key(&secret_key, &params);
+    let keyswitching_key = backend.generate_keyswitching_key(&secret_key, &secret_key, &params); // 임시로 old=new
     
     let context = Box::new(QfheContext { 
         backend,
         secret_key,
         relinearization_key,
+        bootstrap_key,
+        keyswitching_key,
         params,
     });
     Box::into_raw(context)
