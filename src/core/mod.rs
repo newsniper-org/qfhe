@@ -1,8 +1,8 @@
 pub mod quaternion;
 pub use crate::core::quaternion::Quaternion;
 
-pub mod polynominal;
-pub use crate::core::polynominal::Polynomial;
+pub mod polynomial;
+pub use crate::core::polynomial::Polynomial;
 
 pub mod keys;
 pub use crate::core::keys::{SecretKey, RelinearizationKey, KeySwitchingKey, BootstrapKey};
