@@ -37,7 +37,7 @@ fn encrypt_poly(msg_poly: &SimdPolynomial, params: &QfheParameters, secret_key: 
         as_poly = backend.polynomial_add(&as_poly, &backend.polynomial_mul(&a_vec[i], &secret_key.0[i], params), params);
     }
     let b_poly = backend.polynomial_add(&backend.polynomial_add(&as_poly, &e_poly, params), msg_poly, params);
-    Ciphertext { a_vec, b: b_poly }
+    Ciphertext { a_vec, b: b_poly, modulus_level: 0 }
 }
 
 fn polynomial_scalar_mul(p: &SimdPolynomial, scalar: u128, params: &QfheParameters) -> SimdPolynomial {
