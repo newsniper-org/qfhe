@@ -1,19 +1,15 @@
+use super::quaternion::Quaternion;
+
 #[derive(Clone, Debug)]
-#[repr(align(64))]
-pub struct SimdPolynomial {
-    pub w: Vec<u128>,
-    pub x: Vec<u128>,
-    pub y: Vec<u128>,
-    pub z: Vec<u128>,
+pub struct Polynomial {
+    pub coeffs: Vec<Quaternion>,
 }
 
-impl SimdPolynomial {
+impl Polynomial {
+    // 영 다항식을 생성합니다.
     pub fn zero(degree: usize) -> Self {
-        SimdPolynomial {
-            w: vec![0; degree],
-            x: vec![0; degree],
-            y: vec![0; degree],
-            z: vec![0; degree],
+        Polynomial {
+            coeffs: vec![Quaternion::default(); degree],
         }
     }
 }

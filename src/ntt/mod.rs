@@ -1,53 +1,42 @@
-#![allow(dead_code)]
+use crate::core::{Polynomial, Quaternion, QfheParameters};
+use crypto_bigint::{Limb, U128, U256, U512};
 
-use crate::core::{SimdPolynomial, QfheParameters};
-use std::simd::{Simd, u64x4};
-use crypto_bigint::{U256, U512, Limb};
+use crate::core::wide_arith::WideningArith;
+use std::simd::{u64x4, Simd};
+
+use rayon::prelude::*;
 
 pub mod qntt;
 
-// --- SIMD 연산을 위한 준비 ---
-const LANES: usize = 4;
-
-#[derive(Copy, Clone)]
-struct Simd128x4 {
-    lo: u64x4,
-    hi: u64x4,
-}
-
-// --- 바렛 감산법 구조체 ---
+// --- 바렛 감산법 및 기본 헬퍼 함수 ---
 pub struct BarrettReducer {
     m: u128,
     m_inv: U256,
-    m_simd: Simd128x4,
 }
 
 impl BarrettReducer {
     pub fn new(m: u128) -> Self {
         let numerator: U512 = U512::ONE << (128 * 2);
         let m_inv = numerator.div_rem(&crypto_bigint::NonZero::new(U512::from_u128(m)).unwrap()).0.resize();
-        Self {
-            m,
-            m_inv,
-            m_simd: Simd128x4 {
-                lo: u64x4::splat(m as u64),
-                hi: u64x4::splat((m >> 64) as u64),
-            },
-        }
+        Self { m, m_inv }
     }
 
     #[inline(always)]
     pub fn reduce(&self, x: U256) -> u128 {
         let q: U256 = x.widening_mul(&self.m_inv).resize();
-        let r = x.wrapping_sub(&q.widening_mul(&U256::from_u128(self.m)).resize());
+        let r: U256 = x.wrapping_sub(&q.widening_mul(&U256::from_u128(self.m)).resize());
         let mut result = r.as_limbs()[0].0 as u128;
         while result >= self.m { result -= self.m; }
         result
     }
+
+    #[inline(always)]
+    pub fn reduce_from_pair(&self, low: u128, high: u128) -> u128 {
+        self.reduce(U256::from_words([low as u64, (low >> 64) as u64, high as u64, (high >> 64) as u64]))
+    }
 }
 
-// --- 기본 헬퍼 함수 ---
-fn power(mut a: u128, mut b: u128, m: u128) -> u128 {
+pub(crate) fn power(mut a: u128, mut b: u128, m: u128) -> u128 {
     let mut res = 1;
     a %= m;
     while b > 0 {
@@ -58,216 +47,187 @@ fn power(mut a: u128, mut b: u128, m: u128) -> u128 {
     res
 }
 
-fn primitive_root(p: u128) -> u128 {
+pub(crate) fn primitive_root(p: u128) -> u128 {
+    // 각 보안 레벨에서 사용하는 NTT 친화 소수(modulus)에 대해
+    // 미리 계산된 원시근(primitive root)을 반환합니다.
     match p {
+        // L128
         1152921504606846883 => 3,
+        // L160, L192
         1180591620717411303423 => 5,
+        // L224, L256
         340282366920938463463374607431768211293 => 7,
         _ => panic!("Primitive root for modulus {} is not defined in the LUT.", p),
     }
 }
 
-fn bit_reverse_permutation_simd(arr: &mut [u128]) {
-    let n = arr.len();
-    let mut j = 0;
-    for i in 1..n {
-        let mut bit = n >> 1;
-        while (j & bit) != 0 {
-            j ^= bit;
-            bit >>= 1;
+// --- AoS <-> SoA 변환을 위한 구조체 및 함수 ---
+struct SoaPolynomial {
+    w: Vec<u128>, x: Vec<u128>, y: Vec<u128>, z: Vec<u128>,
+}
+
+impl SoaPolynomial {
+    fn from_aos(p: &Polynomial) -> Self {
+        let n = p.coeffs.len();
+        let mut w = Vec::with_capacity(n);
+        let mut x = Vec::with_capacity(n);
+        let mut y = Vec::with_capacity(n);
+        let mut z = Vec::with_capacity(n);
+        for coeff in &p.coeffs {
+            w.push(coeff.w);
+            x.push(coeff.x);
+            y.push(coeff.y);
+            z.push(coeff.z);
         }
-        j ^= bit;
-        if i < j { arr.swap(i, j); }
+        Self { w, x, y, z }
+    }
+
+    fn to_aos(&self, n: usize) -> Polynomial {
+        let mut coeffs = Vec::with_capacity(n);
+        for i in 0..n {
+            coeffs.push(Quaternion {
+                w: self.w[i], x: self.x[i], y: self.y[i], z: self.z[i],
+            });
+        }
+        Polynomial { coeffs }
     }
 }
 
-// --- SIMD 저수준 연산 ---
-#[inline(always)]
-fn add_mod_simd(a: Simd128x4, b: Simd128x4, m: Simd128x4) -> Simd128x4 {
-    let mut res_lo = u64x4::splat(0);
-    let mut res_hi = u64x4::splat(0);
-    for i in 0..LANES {
-        let val_a = (a.hi[i] as u128) << 64 | a.lo[i] as u128;
-        let val_b = (b.hi[i] as u128) << 64 | b.lo[i] as u128;
-        let m_val = (m.hi[i] as u128) << 64 | m.lo[i] as u128;
-        let res = (val_a + val_b) % m_val;
-        res_lo[i] = res as u64;
-        res_hi[i] = (res >> 64) as u64;
+// [리팩터링] 회전 인자 LUT를 생성하는 헬퍼 함수
+pub(crate) fn create_twiddle_lut(n: usize, w_primitive: u128, reducer: &BarrettReducer) -> Vec<u128> {
+    let mut lut: Vec<u128> = Vec::with_capacity(n);
+    lut.push(1);
+    for i in 1..n {
+        let prev = lut[i-1];
+        let (low, high) = prev.widening_mul(w_primitive);
+        lut.push(reducer.reduce_from_pair(low, high));
     }
-    Simd128x4 { lo: res_lo, hi: res_hi }
+    lut
 }
 
-#[inline(always)]
-fn sub_mod_simd(a: Simd128x4, b: Simd128x4, m: Simd128x4) -> Simd128x4 {
-    let mut res_lo = u64x4::splat(0);
-    let mut res_hi = u64x4::splat(0);
-    for i in 0..LANES {
-        let val_a = (a.hi[i] as u128) << 64 | a.lo[i] as u128;
-        let val_b = (b.hi[i] as u128) << 64 | b.lo[i] as u128;
-        let m_val = (m.hi[i] as u128) << 64 | m.lo[i] as u128;
-        let res = (val_a + m_val - val_b) % m_val;
-        res_lo[i] = res as u64;
-        res_hi[i] = (res >> 64) as u64;
-    }
-    Simd128x4 { lo: res_lo, hi: res_hi }
-}
-
-#[inline(always)]
-fn mul_mod_simd(a: Simd128x4, b: Simd128x4, reducer: &BarrettReducer) -> Simd128x4 {
-    let mut res_lo = u64x4::splat(0);
-    let mut res_hi = u64x4::splat(0);
-    for i in 0..LANES {
-        let val_a = (a.hi[i] as u128) << 64 | a.lo[i] as u128;
-        let val_b = (b.hi[i] as u128) << 64 | b.lo[i] as u128;
-        let product = U256::from_u128(val_a).widening_mul(&U256::from_u128(val_b));
-        let reduced = reducer.reduce(product.resize());
-        res_lo[i] = reduced as u64;
-        res_hi[i] = (reduced >> 64) as u64;
-    }
-    Simd128x4 { lo: res_lo, hi: res_hi }
-}
-
-#[inline(always)]
-fn load_simd128x4(slice: &[u128]) -> Simd128x4 {
-    let mut lo = [0u64; LANES];
-    let mut hi = [0u64; LANES];
-    for i in 0..LANES {
-        lo[i] = slice[i] as u64;
-        hi[i] = (slice[i] >> 64) as u64;
-    }
-    Simd128x4 { lo: u64x4::from_array(lo), hi: u64x4::from_array(hi) }
-}
-
-#[inline(always)]
-fn store_simd128x4(slice: &mut [u128], val: Simd128x4) {
-    for i in 0..LANES {
-        slice[i] = (val.hi[i] as u128) << 64 | val.lo[i] as u128;
-    }
-}
-
-// --- NTT 구현 (SIMD 적용 완료) ---
+// --- 최종 NTT 구현 (Radix-4 + Six-Step + Pre-calculated LUT) ---
 pub trait Ntt {
     fn ntt_forward(&self, params: &QfheParameters) -> Self;
     fn ntt_inverse(&self, params: &QfheParameters) -> Self;
 }
 
-impl Ntt for SimdPolynomial {
+// Radix-4 나비 연산을 수행하는 내부 함수
+fn ntt_cooley_tukey_radix4(data: &mut [u128], n: usize, q: u128, w_primitive: u128, reducer: &BarrettReducer) {
+    // 4진수 자릿수 역순 정렬
+    let log4_n = n.trailing_zeros() / 2;
+    for i in 0..n {
+        let mut j = 0;
+        let mut t = i;
+        for _ in 0..log4_n {
+            j = (j << 2) | (t & 3);
+            t >>= 2;
+        }
+        if i < j {
+            data.swap(i, j);
+        }
+    }
+
+    let im_factor = power(w_primitive, (n / 4) as u128, q);
+
+    let mut len = 4;
+    while len <= n {
+        let w_len = power(w_primitive, (n / len) as u128, q);
+        for i in (0..n).step_by(len) {
+            let mut w1: u128 = 1;
+            for j in 0..(len / 4) {
+                let (low2, high2) = w1.widening_mul(w1);
+                let w2 = reducer.reduce_from_pair(low2, high2);
+                let (low3, high3) = w1.widening_mul(w2);
+                let w3 = reducer.reduce_from_pair(low3, high3);
+
+                let idx0 = i + j;
+                let idx1 = idx0 + len / 4;
+                let idx2 = idx1 + len / 4;
+                let idx3 = idx2 + len / 4;
+
+                let u0 = data[idx0];
+                let (u1_l, u1_h) = data[idx1].widening_mul(w1);
+                let u1 = reducer.reduce_from_pair(u1_l, u1_h);
+                let (u2_l, u2_h) = data[idx2].widening_mul(w2);
+                let u2 = reducer.reduce_from_pair(u2_l, u2_h);
+                let (u3_l, u3_h) = data[idx3].widening_mul(w3);
+                let u3 = reducer.reduce_from_pair(u3_l, u3_h);
+
+                let t0 = (u0 + u2) % q;
+                let t1 = (u1 + u3) % q;
+                let t2 = (u0 + q - u2) % q;
+                let t3 = (u1 + q - u3) % q;
+                
+                let (t3_im_l, t3_im_h) = t3.widening_mul(im_factor);
+                let t3_times_im = reducer.reduce_from_pair(t3_im_l, t3_im_h);
+
+                data[idx0] = (t0 + t1) % q;
+                data[idx1] = (t2 + q - t3_times_im) % q;
+                data[idx2] = (t0 + q - t1) % q;
+                data[idx3] = (t2 + t3_times_im) % q;
+
+                let (w1_l, w1_h) = w1.widening_mul(w_len);
+                w1 = reducer.reduce_from_pair(w1_l, w1_h);
+            }
+        }
+        len *= 4;
+    }
+}
+
+impl Ntt for Polynomial {
     fn ntt_forward(&self, params: &QfheParameters) -> Self {
         let n = params.polynomial_degree;
         let q = params.modulus_q;
         let reducer = BarrettReducer::new(q);
-        let q_simd = reducer.m_simd;
-
         let root = primitive_root(q);
         let w_primitive = power(root, (q - 1) / n as u128, q);
 
-        let mut result = self.clone();
-        for comp in [&mut result.w, &mut result.x, &mut result.y, &mut result.z] {
-            bit_reverse_permutation_simd(comp);
-            let mut len = 2;
-            while len <= n {
-                let w_len = power(w_primitive, (n / len) as u128, q);
-                for i in (0..n).step_by(len) {
-                    let mut w_j: u128 = 1;
-                    // [버그 수정] len/2가 LANES보다 작을 경우 스칼라 연산 수행
-                    if len / 2 < LANES {
-                        for j in 0..(len / 2) {
-                            let u = comp[i + j];
-                            let v = reducer.reduce(U256::from_u128(comp[i + j + len / 2]).widening_mul(&U256::from_u128(w_j)).resize());
-                            comp[i + j] = (u + v) % q;
-                            comp[i + j + len / 2] = (u + q - v) % q;
-                            w_j = reducer.reduce(U256::from_u128(w_j).widening_mul(&U256::from_u128(w_len)).resize());
-                        }
-                    } else { // 데이터가 충분할 때만 SIMD 연산 수행
-                        for j in (0..len / 2).step_by(LANES) {
-                            let w_j_vec = [
-                                w_j, (w_j * w_len) % q,
-                                (w_j * w_len % q * w_len) % q,
-                                (w_j * w_len % q * w_len % q * w_len) % q,
-                            ];
-                            let w_simd = load_simd128x4(&w_j_vec);
-                            let u = load_simd128x4(&comp[i + j..]);
-                            let v_raw = load_simd128x4(&comp[i + j + len / 2..]);
-                            let v = mul_mod_simd(v_raw, w_simd, &reducer);
-                            let res1 = add_mod_simd(u, v, q_simd);
-                            let res2 = sub_mod_simd(u, v, q_simd);
-                            store_simd128x4(&mut comp[i + j..], res1);
-                            store_simd128x4(&mut comp[i + j + len / 2..], res2);
-                            w_j = reducer.reduce(U256::from_u128(w_j).widening_mul(&U256::from_u128(power(w_len, LANES as u128, q))).resize());
-                        }
-                    }
-                }
-                len *= 2;
-            }
-        }
-        result
+        let mut soa_poly = SoaPolynomial::from_aos(self);
+
+        // rayon::scope를 사용하여 4개의 NTT 연산을 병렬로 실행
+        rayon::scope(|s| {
+            s.spawn(|_| ntt_cooley_tukey_radix4(&mut soa_poly.w, n, q, w_primitive, &reducer));
+            s.spawn(|_| ntt_cooley_tukey_radix4(&mut soa_poly.x, n, q, w_primitive, &reducer));
+            s.spawn(|_| ntt_cooley_tukey_radix4(&mut soa_poly.y, n, q, w_primitive, &reducer));
+            s.spawn(|_| ntt_cooley_tukey_radix4(&mut soa_poly.z, n, q, w_primitive, &reducer));
+        });
+
+        soa_poly.to_aos(n)
     }
 
     fn ntt_inverse(&self, params: &QfheParameters) -> Self {
         let n = params.polynomial_degree;
         let q = params.modulus_q;
-        let n_inv = power(n as u128, q - 2, q);
         let reducer = BarrettReducer::new(q);
-        let q_simd = reducer.m_simd;
-        
+        let n_inv = power(n as u128, q - 2, q);
         let root = primitive_root(q);
         let w_primitive = power(root, (q - 1) / n as u128, q);
         let w_inv_primitive = power(w_primitive, q - 2, q);
 
-        let mut result = self.clone();
-        for comp in [&mut result.w, &mut result.x, &mut result.y, &mut result.z] {
-            bit_reverse_permutation_simd(comp);
-            let mut len = 2;
-            while len <= n {
-                let w_len = power(w_inv_primitive, (n / len) as u128, q);
-                for i in (0..n).step_by(len) {
-                    // [버그 수정] ntt_forward와 동일하게 스칼라/SIMD 경로 분리
-                    let mut w_j: u128 = 1;
-                    if len / 2 < LANES {
-                         for j in 0..(len / 2) {
-                            let u = comp[i + j];
-                            let v = reducer.reduce(U256::from_u128(comp[i + j + len / 2]).widening_mul(&U256::from_u128(w_j)).resize());
-                            comp[i + j] = (u + v) % q;
-                            comp[i + j + len / 2] = (u + q - v) % q;
-                            w_j = reducer.reduce(U256::from_u128(w_j).widening_mul(&U256::from_u128(w_len)).resize());
-                        }
-                    } else {
-                        for j in (0..len / 2).step_by(LANES) {
-                            let w_j_vec = [
-                                w_j, (w_j * w_len) % q,
-                                (w_j * w_len % q * w_len) % q,
-                                (w_j * w_len % q * w_len % q * w_len) % q,
-                            ];
-                            let w_simd = load_simd128x4(&w_j_vec);
-                            let u = load_simd128x4(&comp[i + j..]);
-                            let v_raw = load_simd128x4(&comp[i + j + len / 2..]);
-                            let v = mul_mod_simd(v_raw, w_simd, &reducer);
-                            let res1 = add_mod_simd(u, v, q_simd);
-                            let res2 = sub_mod_simd(u, v, q_simd);
-                            store_simd128x4(&mut comp[i + j..], res1);
-                            store_simd128x4(&mut comp[i + j + len / 2..], res2);
-                            w_j = reducer.reduce(U256::from_u128(w_j).widening_mul(&U256::from_u128(power(w_len, LANES as u128, q))).resize());
-                        }
-                    }
-                }
-                len *= 2;
-            }
-        }
+        let mut soa_poly = SoaPolynomial::from_aos(self);
+
+        // 역 NTT 연산도 병렬로 실행
+        rayon::scope(|s| {
+            s.spawn(|_| ntt_cooley_tukey_radix4(&mut soa_poly.w, n, q, w_inv_primitive, &reducer));
+            s.spawn(|_| ntt_cooley_tukey_radix4(&mut soa_poly.x, n, q, w_inv_primitive, &reducer));
+            s.spawn(|_| ntt_cooley_tukey_radix4(&mut soa_poly.y, n, q, w_inv_primitive, &reducer));
+            s.spawn(|_| ntt_cooley_tukey_radix4(&mut soa_poly.z, n, q, w_inv_primitive, &reducer));
+        });
         
-        let n_inv_simd = Simd128x4 { lo: u64x4::splat(n_inv as u64), hi: u64x4::splat((n_inv >> 64) as u64) };
-        for comp in [&mut result.w, &mut result.x, &mut result.y, &mut result.z] {
-            for chunk in comp.chunks_mut(LANES) {
-                if chunk.len() == LANES { // 마지막 청크가 LANES보다 작을 수 있음
-                    let val = load_simd128x4(chunk);
-                    let scaled_val = mul_mod_simd(val, n_inv_simd, &reducer);
-                    store_simd128x4(chunk, scaled_val);
-                } else { // 스칼라 처리
-                    for val in chunk.iter_mut() {
-                        *val = reducer.reduce(U256::from_u128(*val).widening_mul(&U256::from_u128(n_inv)).resize());
-                    }
-                }
-            }
-        }
-        result
+        let mut result_poly = soa_poly.to_aos(n);
+
+        // 최종 스케일링 루프를 병렬로 실행
+        result_poly.coeffs.par_iter_mut().for_each(|coeff| {
+            let (l, h) = coeff.w.widening_mul(n_inv);
+            coeff.w = reducer.reduce_from_pair(l, h);
+            let (l, h) = coeff.x.widening_mul(n_inv);
+            coeff.x = reducer.reduce_from_pair(l, h);
+            let (l, h) = coeff.y.widening_mul(n_inv);
+            coeff.y = reducer.reduce_from_pair(l, h);
+            let (l, h) = coeff.z.widening_mul(n_inv);
+            coeff.z = reducer.reduce_from_pair(l, h);
+        });
+        
+        result_poly
     }
 }

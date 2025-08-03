@@ -15,7 +15,7 @@ pub struct QfheContext {
     relinearization_key: RelinearizationKey,
     bootstrap_key: BootstrapKey,
     keyswitching_key: KeySwitchingKey,
-    params: QfheParameters,
+    params: QfheParameters<'static>,
 }
 
 // QfheEngine 트레이트 구현부도 시그니처는 동일하므로 변경할 필요가 없습니다.
