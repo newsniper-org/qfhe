@@ -1,4 +1,5 @@
 #![feature(bigint_helper_methods)]
+#![feature(portable_simd)]
 
 // 라이브러리의 각 모듈을 선언합니다.
 pub mod core;

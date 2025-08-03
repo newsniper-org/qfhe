@@ -7,6 +7,9 @@ pub use crate::core::polynomial::Polynomial;
 pub mod keys;
 pub use crate::core::keys::{SecretKey, RelinearizationKey, KeySwitchingKey, BootstrapKey};
 
+pub(crate) mod wide_arith;
+pub(crate) use crate::core::wide_arith::WideningArith;
+
 use crate::ntt::{power, primitive_root, BarrettReducer};
 
 /// C FFI에서 사용할 보안 수준 열거형입니다.
