@@ -1039,7 +1039,7 @@ impl SecurityLevel {
 pub struct Ciphertext {
     pub a_vec: Vec<Polynomial>, // k개의 다항식 벡터
     pub b: Polynomial,          // 1개의 다항식
-    pub modulus_level: usize,   // 현재 모듈러스 레벨 추적 필드
+    pub modulus_level: usize, 
 }
 
 /// GGSW 암호문은 부트스트래핑의 핵심 요소입니다.
@@ -1054,9 +1054,7 @@ pub trait QfheEngine {
     fn decrypt(&self, ciphertext: &Ciphertext) -> u64;
     fn homomorphic_add(&self, ct1: &Ciphertext, ct2: &Ciphertext) -> Ciphertext;
     fn homomorphic_sub(&self, ct1: &Ciphertext, ct2: &Ciphertext) -> Ciphertext;
-
     fn homomorphic_mul(&self, ct1: &Ciphertext, ct2: &Ciphertext) -> Ciphertext;
-    fn bootstrap(&self, ct: &Ciphertext, test_poly: &Polynomial) -> Ciphertext;
-
+    fn bootstrap(&self, ct: &Ciphertext, test_poly: &SimdPolynomial) -> Ciphertext;
     fn modulus_switch(&self, ct: &Ciphertext) -> Ciphertext;
 }
