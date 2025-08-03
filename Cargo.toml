@@ -1,10 +1,10 @@
 [package]
 name = "qfhe"
-version = "0.0.3"
+version = "0.0.4"
 edition = "2024"
 
 [toolchain]
-channel = "stable"
+channel = "nightly"
 
 [lib]
 crate-type = ["cdylib"] # C-compatible dynamic library로 컴파일
@@ -14,6 +14,7 @@ bindgen = "0.72.0"
 cbindgen = "0.29.0"
 
 [dependencies]
-num-complex = { version = "0.4.6", features = ["rand"] }
+crypto-bigint = { version = "0.6.1", features = ["alloc", "rand_core"] }
 rand = "0.9.2"
 rand_distr = { version = "0.5.1", features = ["std_math"] }
+rayon = "1.10.0"
