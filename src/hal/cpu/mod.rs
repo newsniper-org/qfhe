@@ -95,7 +95,7 @@ impl CpuBackend {
         let b_poly = self.polynomial_add(&as_poly, &e_poly, params);
         let b_poly = self.polynomial_add(&b_poly, &msg_poly, params);
 
-        Ciphertext { a_vec, b: b_poly }
+        Ciphertext { a_vec, b: b_poly, modulus_level: 0 }
     }
 
     fn decompose(&self, poly: &Polynomial, params: &QfheParameters) -> Vec<Polynomial> {
@@ -120,6 +120,12 @@ impl CpuBackend {
     }
 
     fn external_product(&self, ggsw: &GgswCiphertext, ct: &Ciphertext, params: &QfheParameters) -> Ciphertext {
+        // ◀◀ 레벨 일치 여부 검사
+        // GGSW 암호문이 비어있지 않은지 확인하고, 첫 번째 암호문의 레벨을 기준으로 비교합니다.
+        if let Some(first_ggsw_level_ct) = ggsw.levels.first() {
+            assert_eq!(first_ggsw_level_ct.modulus_level, ct.modulus_level, "GGSW and Ciphertext must have the same modulus level for external product.");
+        }
+
         let levels = params.gadget_levels_l;
         let k = params.module_dimension_k;
         let n = params.polynomial_degree;
@@ -156,7 +162,7 @@ impl CpuBackend {
         }
         
         println!("[Info] external_product: 연산 완료.");
-        Ciphertext { a_vec: res_a_vec, b: res_b }
+        Ciphertext { a_vec: res_a_vec, b: res_b, modulus_level: ct.modulus_level }
     }
 }
 
@@ -198,7 +204,7 @@ impl HardwareBackend for CpuBackend {
         let b_poly = self.polynomial_add(&as_poly, &e_poly, params);
         let b_poly = self.polynomial_add(&b_poly, &scaled_m_poly, params);
 
-        Ciphertext { a_vec, b: b_poly }
+        Ciphertext { a_vec, b: b_poly, modulus_level: 0 }
     }
 
     fn decrypt(&self, ciphertext: &Ciphertext, params: &QfheParameters, secret_key: &SecretKey) -> u64 {
@@ -264,21 +270,23 @@ impl HardwareBackend for CpuBackend {
     }
     
     fn homomorphic_add(&self, ct1: &Ciphertext, ct2: &Ciphertext, params: &QfheParameters) -> Ciphertext {
+        assert_eq!(ct1.modulus_level, ct2.modulus_level, "Ciphertexts must have the same modulus level for addition.");
         let k = params.module_dimension_k;
         let a_vec_add = (0..k)
             .map(|i| self.polynomial_add(&ct1.a_vec[i], &ct2.a_vec[i], params))
             .collect();
         let b_add = self.polynomial_add(&ct1.b, &ct2.b, params);
-        Ciphertext { a_vec: a_vec_add, b: b_add }
+        Ciphertext { a_vec: a_vec_add, b: b_add, modulus_level: ct1.modulus_level }
     }
 
     fn homomorphic_sub(&self, ct1: &Ciphertext, ct2: &Ciphertext, params: &QfheParameters) -> Ciphertext {
+        assert_eq!(ct1.modulus_level, ct2.modulus_level, "Ciphertexts must have the same modulus level for subtraction.");
         let k = params.module_dimension_k;
         let a_vec_sub = (0..k)
             .map(|i| self.polynomial_sub(&ct1.a_vec[i], &ct2.a_vec[i], params))
             .collect();
         let b_sub = self.polynomial_sub(&ct1.b, &ct2.b, params);
-        Ciphertext { a_vec: a_vec_sub, b: b_sub }
+        Ciphertext { a_vec: a_vec_sub, b: b_sub, modulus_level: ct1.modulus_level }
     }
 
 
@@ -300,6 +308,7 @@ impl HardwareBackend for CpuBackend {
     }
 
     fn homomorphic_mul(&self, ct1: &Ciphertext, ct2: &Ciphertext, rlk: &RelinearizationKey, params: &QfheParameters) -> Ciphertext {
+        assert_eq!(ct1.modulus_level, ct2.modulus_level, "Ciphertexts must have the same modulus level for multiplication.");
         // 1. 암호문 곱셈 (Tensor Product)
         // ct_new = (c0, c1, c2) 형태의 2차 암호문 생성.
         // c0 = b1*b2, c1 = a1*b2 + b1*a2, c2 = a1*a2
@@ -331,7 +340,7 @@ impl HardwareBackend for CpuBackend {
             new_b = self.polynomial_add(&new_b, &rlk_b_mul_c2, params);
         }
 
-        Ciphertext { a_vec: new_a_vec, b: new_b }
+        Ciphertext { a_vec: new_a_vec, b: new_b, modulus_level: ct1.modulus_level }
     }
 
 
@@ -408,7 +417,7 @@ impl HardwareBackend for CpuBackend {
         // 이 결과값의 최상위 비트들이 원래 메시지의 정보를 담고 있습니다.
         let temp_params = QfheParameters {
             modulus_q: params.modulus_q,
-            modulus_chain: vec![2 * params.polynomial_degree as u128], // 목표 모듈러스: 2N
+            modulus_chain: &[2 * params.polynomial_degree as u128], // 목표 모듈러스: 2N
             ..params.clone()
         };
         let switched_ct = self.modulus_switch(ct, &temp_params);
@@ -416,7 +425,7 @@ impl HardwareBackend for CpuBackend {
         println!("[Info] bootstrap: Modulus Switching 기반 위상 추출 완료 (scaled_phase: {}).", scaled_phase);
 
         // --- 2. 블라인드 회전 (Blind Rotation) ---
-        let mut accumulator_ct = encrypt_poly(self, test_poly, params, &SecretKey(vec![])); // 임시 SK
+        let mut accumulator_ct = self.encrypt_poly( test_poly, params, &SecretKey(vec![])); // 임시 SK
         
         println!("[Info] bootstrap: 블라인드 회전 시작 ({}개의 GGSW 암호문 사용).", bsk.ggsw_vector.len());
 
@@ -445,6 +454,11 @@ impl HardwareBackend for CpuBackend {
     }
 
     fn keyswitch(&self, ct: &Ciphertext, ksk: &KeySwitchingKey, params: &QfheParameters) -> Ciphertext {
+        // ksk의 첫 번째 암호문과 ct의 레벨을 비교하여 일치하는지 검사
+        if !ksk.key.is_empty() && !ksk.key[0].is_empty() {
+            assert_eq!(ct.modulus_level, ksk.key[0][0].modulus_level, "Ciphertext and KeySwitchingKey must have the same modulus level.");
+        }
+
         let n = params.polynomial_degree;
         let k = params.module_dimension_k;
 
@@ -456,6 +470,7 @@ impl HardwareBackend for CpuBackend {
         let mut new_ct = Ciphertext {
             a_vec: vec![Polynomial::zero(n); k],
             b: ct.b.clone(),
+            modulus_level: ct.modulus_level,
         };
 
         // 3. 분해된 값과 키 스위칭 키(ksk)를 사용하여 내적(dot product)을 수행합니다.
@@ -487,34 +502,44 @@ impl HardwareBackend for CpuBackend {
         new_ct
     }
 
-    fn modulus_switch(&self, ct: &Ciphertext, params: &QfheParameters) -> Ciphertext {
-        let old_modulus = params.modulus_q;
-        // 체인의 다음 모듈러스를 가져옵니다 (여기서는 간단히 마지막 것을 사용).
-        let new_modulus = *params.modulus_chain.last().unwrap_or(&old_modulus);
-
-        if new_modulus >= old_modulus {
-            return ct.clone(); // 스위칭할 필요 없음
-        }
-
-        let scale = |val: u128| -> u128 {
-            // (val * new_modulus) / old_modulus, 정수 연산으로 근사
-            // BigUint 라이브러리를 사용하면 더 정확한 연산이 가능합니다.
-            let scaled = (val as u128 * new_modulus) / old_modulus;
-            let error = val - (scaled * old_modulus) / new_modulus;
-            // 반올림을 위해 에러를 더해줍니다.
-            scaled + (error * 2 / old_modulus)
+    fn modulus_switch(&self, ct: &Ciphertext, params: &QfheParameters<'_>) -> Ciphertext {
+        // 체인의 다음 모듈러스를 가져옵니다
+        // 1. 현재 레벨과 다음 레벨의 모듈러스를 가져옴
+        let current_level = ct.modulus_level;
+        let next_level = current_level + 1;
+        
+        // 현재 모듈러스 q_i
+        let current_modulus = if current_level == 0 {
+            params.modulus_q
+        } else {
+            params.modulus_chain[current_level - 1]
         };
 
-        let switch_poly = |poly: &Polynomial| -> Polynomial {
+        // 다음 모듈러스 q_{i+1}
+        if next_level > params.modulus_chain.len() {
+            panic!("Cannot switch modulus: already at the last level.");
+        }
+        let next_modulus = params.modulus_chain[current_level];
+
+        let scale = |val: u128| -> u128 {
+            // (val * next_modulus) / current_modulus, 정수 연산으로 근사
+            // BigUint 라이브러리를 사용하면 더 정확한 연산이 가능합니다.
+            let scaled = (val as u128 * next_modulus) / current_modulus;
+            let error = val - (scaled * current_modulus) / next_modulus;
+            // 반올림을 위해 에러를 더해줍니다.
+            scaled + (error * 2 / current_modulus)
+        };
+
+        let scale_vec = |poly: &Polynomial| -> Polynomial {
             let new_coeffs = poly.coeffs.iter().map(|q| Quaternion {
                 w: scale(q.w), x: scale(q.x), y: scale(q.y), z: scale(q.z),
             }).collect();
             Polynomial { coeffs: new_coeffs }
         };
 
-        let new_a_vec = ct.a_vec.iter().map(switch_poly).collect();
-        let new_b = switch_poly(&ct.b);
+        let new_a_vec = ct.a_vec.iter().map(scale_vec).collect();
+        let new_b = scale_vec(&ct.b);
 
-        Ciphertext { a_vec: new_a_vec, b: new_b }
+        Ciphertext { a_vec: new_a_vec, b: new_b, modulus_level: next_level }
     }
 }

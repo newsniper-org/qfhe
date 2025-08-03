@@ -12,7 +12,7 @@ pub struct QfheContext {
     relinearization_key: RelinearizationKey,
     bootstrap_key: BootstrapKey,
     keyswitching_key: KeySwitchingKey,
-    params: QfheParameters,
+    params: QfheParameters<'static>,
 }
 
 impl QfheEngine for QfheContext {
