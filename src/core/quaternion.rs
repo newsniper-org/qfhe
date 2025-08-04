@@ -1,7 +1,6 @@
 use std::ops::{Add, Sub, Mul, Rem};
 
 // QFHE의 기본 연산을 위한 4원수(Quaternion)를 정의합니다.
-// SIMD 연산에 최적화될 수 있는 구조입니다. [8, 9]
 #[derive(Clone, Debug, Copy)]
 pub struct Quaternion {
     pub w: u128,

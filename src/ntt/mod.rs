@@ -1,11 +1,6 @@
 use crate::core::{Polynomial, Quaternion, QfheParameters};
 use crypto_bigint::{Limb, U128, U256, U512};
 
-use crate::core::wide_arith::WideningArith;
-use std::simd::{u64x4, Simd};
-
-use rayon::prelude::*;
-
 pub mod qntt;
 
 // --- 바렛 감산법 및 기본 헬퍼 함수 ---
@@ -61,36 +56,12 @@ pub(crate) fn primitive_root(p: u128) -> u128 {
     }
 }
 
-// --- AoS <-> SoA 변환을 위한 구조체 및 함수 ---
-struct SoaPolynomial {
-    w: Vec<u128>, x: Vec<u128>, y: Vec<u128>, z: Vec<u128>,
-}
 
-impl SoaPolynomial {
-    fn from_aos(p: &Polynomial) -> Self {
-        let n = p.coeffs.len();
-        let mut w = Vec::with_capacity(n);
-        let mut x = Vec::with_capacity(n);
-        let mut y = Vec::with_capacity(n);
-        let mut z = Vec::with_capacity(n);
-        for coeff in &p.coeffs {
-            w.push(coeff.w);
-            x.push(coeff.x);
-            y.push(coeff.y);
-            z.push(coeff.z);
-        }
-        Self { w, x, y, z }
-    }
-
-    fn to_aos(&self, n: usize) -> Polynomial {
-        let mut coeffs = Vec::with_capacity(n);
-        for i in 0..n {
-            coeffs.push(Quaternion {
-                w: self.w[i], x: self.x[i], y: self.y[i], z: self.z[i],
-            });
-        }
-        Polynomial { coeffs }
-    }
+pub(crate) const fn widening_mul_helper(a: u128, b: u128) -> U256 {
+    let (low, high) = a.widening_mul(b);
+    let low_converted: U128 = U128::from_u128(low);
+    let high_converted: U128 = U128::from_u128(high);
+    low_converted.concat(&high_converted)
 }
 
 // [리팩터링] 회전 인자 LUT를 생성하는 헬퍼 함수
@@ -99,8 +70,7 @@ pub(crate) fn create_twiddle_lut(n: usize, w_primitive: u128, reducer: &BarrettR
     lut.push(1);
     for i in 1..n {
         let prev = lut[i-1];
-        let (low, high) = prev.widening_mul(w_primitive);
-        lut.push(reducer.reduce_from_pair(low, high));
+        lut.push(reducer.reduce(widening_mul_helper(prev, w_primitive)));
     }
     lut
 }
@@ -111,9 +81,7 @@ pub trait Ntt {
     fn ntt_inverse(&self, params: &QfheParameters) -> Self;
 }
 
-// Radix-4 나비 연산을 수행하는 내부 함수
-fn ntt_cooley_tukey_radix4(data: &mut [u128], n: usize, q: u128, w_primitive: u128, reducer: &BarrettReducer) {
-    // 4진수 자릿수 역순 정렬
+fn ntt_cooley_tukey_radix4(data: &mut [Quaternion], n: usize, q: u128, w_primitive: u128, reducer: &BarrettReducer) {
     let log4_n = n.trailing_zeros() / 2;
     for i in 0..n {
         let mut j = 0;
@@ -135,24 +103,28 @@ fn ntt_cooley_tukey_radix4(data: &mut [u128], n: usize, q: u128, w_primitive: u1
         for i in (0..n).step_by(len) {
             let mut w1: u128 = 1;
             for j in 0..(len / 4) {
+                // [버그 수정] 반환 튜플 순서 (high, low) -> (low, high)
                 let (low2, high2) = w1.widening_mul(w1);
-                let w2 = reducer.reduce_from_pair(low2, high2);
+                let w2 = reducer.reduce_from_pair(low2,high2);
+                
                 let (low3, high3) = w1.widening_mul(w2);
-                let w3 = reducer.reduce_from_pair(low3, high3);
+                let w3 = reducer.reduce_from_pair(low3,high3);
 
                 let idx0 = i + j;
                 let idx1 = idx0 + len / 4;
                 let idx2 = idx1 + len / 4;
                 let idx3 = idx2 + len / 4;
 
-                let u0 = data[idx0];
-                let (u1_l, u1_h) = data[idx1].widening_mul(w1);
-                let u1 = reducer.reduce_from_pair(u1_l, u1_h);
-                let (u2_l, u2_h) = data[idx2].widening_mul(w2);
-                let u2 = reducer.reduce_from_pair(u2_l, u2_h);
-                let (u3_l, u3_h) = data[idx3].widening_mul(w3);
+                let (u1_l, u1_h) = data[idx1].w.widening_mul(w1);
+                let u1 = reducer.reduce_from_pair(u1_l,u1_h);
+                
+                let (u2_l, u2_h) = data[idx2].w.widening_mul(w2);
+                let u2 = reducer.reduce_from_pair(u2_l,u2_h);
+
+                let (u3_l, u3_h) = data[idx3].w.widening_mul(w3);
                 let u3 = reducer.reduce_from_pair(u3_l, u3_h);
 
+                let u0 = data[idx0].w;
                 let t0 = (u0 + u2) % q;
                 let t1 = (u1 + u3) % q;
                 let t2 = (u0 + q - u2) % q;
@@ -161,10 +133,10 @@ fn ntt_cooley_tukey_radix4(data: &mut [u128], n: usize, q: u128, w_primitive: u1
                 let (t3_im_l, t3_im_h) = t3.widening_mul(im_factor);
                 let t3_times_im = reducer.reduce_from_pair(t3_im_l, t3_im_h);
 
-                data[idx0] = (t0 + t1) % q;
-                data[idx1] = (t2 + q - t3_times_im) % q;
-                data[idx2] = (t0 + q - t1) % q;
-                data[idx3] = (t2 + t3_times_im) % q;
+                data[idx0].w = (t0 + t1) % q;
+                data[idx1].w = (t2 + q - t3_times_im) % q;
+                data[idx2].w = (t0 + q - t1) % q;
+                data[idx3].w = (t2 + t3_times_im) % q;
 
                 let (w1_l, w1_h) = w1.widening_mul(w_len);
                 w1 = reducer.reduce_from_pair(w1_l, w1_h);
@@ -174,6 +146,7 @@ fn ntt_cooley_tukey_radix4(data: &mut [u128], n: usize, q: u128, w_primitive: u1
     }
 }
 
+
 impl Ntt for Polynomial {
     fn ntt_forward(&self, params: &QfheParameters) -> Self {
         let n = params.polynomial_degree;
@@ -181,18 +154,10 @@ impl Ntt for Polynomial {
         let reducer = BarrettReducer::new(q);
         let root = primitive_root(q);
         let w_primitive = power(root, (q - 1) / n as u128, q);
-
-        let mut soa_poly = SoaPolynomial::from_aos(self);
-
-        // rayon::scope를 사용하여 4개의 NTT 연산을 병렬로 실행
-        rayon::scope(|s| {
-            s.spawn(|_| ntt_cooley_tukey_radix4(&mut soa_poly.w, n, q, w_primitive, &reducer));
-            s.spawn(|_| ntt_cooley_tukey_radix4(&mut soa_poly.x, n, q, w_primitive, &reducer));
-            s.spawn(|_| ntt_cooley_tukey_radix4(&mut soa_poly.y, n, q, w_primitive, &reducer));
-            s.spawn(|_| ntt_cooley_tukey_radix4(&mut soa_poly.z, n, q, w_primitive, &reducer));
-        });
-
-        soa_poly.to_aos(n)
+        
+        let mut result = self.clone();
+        ntt_cooley_tukey_radix4(&mut result.coeffs, n, q, w_primitive, &reducer);
+        result
     }
 
     fn ntt_inverse(&self, params: &QfheParameters) -> Self {
@@ -200,34 +165,19 @@ impl Ntt for Polynomial {
         let q = params.modulus_q;
         let reducer = BarrettReducer::new(q);
         let n_inv = power(n as u128, q - 2, q);
+        
         let root = primitive_root(q);
         let w_primitive = power(root, (q - 1) / n as u128, q);
         let w_inv_primitive = power(w_primitive, q - 2, q);
 
-        let mut soa_poly = SoaPolynomial::from_aos(self);
+        let mut result = self.clone();
+        ntt_cooley_tukey_radix4(&mut result.coeffs, n, q, w_inv_primitive, &reducer);
 
-        // 역 NTT 연산도 병렬로 실행
-        rayon::scope(|s| {
-            s.spawn(|_| ntt_cooley_tukey_radix4(&mut soa_poly.w, n, q, w_inv_primitive, &reducer));
-            s.spawn(|_| ntt_cooley_tukey_radix4(&mut soa_poly.x, n, q, w_inv_primitive, &reducer));
-            s.spawn(|_| ntt_cooley_tukey_radix4(&mut soa_poly.y, n, q, w_inv_primitive, &reducer));
-            s.spawn(|_| ntt_cooley_tukey_radix4(&mut soa_poly.z, n, q, w_inv_primitive, &reducer));
-        });
-        
-        let mut result_poly = soa_poly.to_aos(n);
-
-        // 최종 스케일링 루프를 병렬로 실행
-        result_poly.coeffs.par_iter_mut().for_each(|coeff| {
+        for coeff in result.coeffs.iter_mut() {
+            // [버그 수정] 반환 튜플 순서 (h, l) -> (l, h)
             let (l, h) = coeff.w.widening_mul(n_inv);
             coeff.w = reducer.reduce_from_pair(l, h);
-            let (l, h) = coeff.x.widening_mul(n_inv);
-            coeff.x = reducer.reduce_from_pair(l, h);
-            let (l, h) = coeff.y.widening_mul(n_inv);
-            coeff.y = reducer.reduce_from_pair(l, h);
-            let (l, h) = coeff.z.widening_mul(n_inv);
-            coeff.z = reducer.reduce_from_pair(l, h);
-        });
-        
-        result_poly
+        }
+        result
     }
 }

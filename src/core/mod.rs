@@ -7,9 +7,6 @@ pub use crate::core::polynomial::Polynomial;
 pub mod keys;
 pub use crate::core::keys::{SecretKey, RelinearizationKey, KeySwitchingKey, BootstrapKey};
 
-pub(crate) mod wide_arith;
-pub(crate) use crate::core::wide_arith::WideningArith;
-
 use crate::ntt::{power, primitive_root, BarrettReducer};
 
 /// C FFI에서 사용할 보안 수준 열거형입니다.
@@ -1039,7 +1036,7 @@ impl SecurityLevel {
 pub struct Ciphertext {
     pub a_vec: Vec<Polynomial>, // k개의 다항식 벡터
     pub b: Polynomial,          // 1개의 다항식
-    pub modulus_level: usize, 
+    pub modulus_level: usize,   // 현재 모듈러스 레벨 추적 필드
 }
 
 /// GGSW 암호문은 부트스트래핑의 핵심 요소입니다.
@@ -1054,7 +1051,9 @@ pub trait QfheEngine {
     fn decrypt(&self, ciphertext: &Ciphertext) -> u64;
     fn homomorphic_add(&self, ct1: &Ciphertext, ct2: &Ciphertext) -> Ciphertext;
     fn homomorphic_sub(&self, ct1: &Ciphertext, ct2: &Ciphertext) -> Ciphertext;
+
     fn homomorphic_mul(&self, ct1: &Ciphertext, ct2: &Ciphertext) -> Ciphertext;
-    fn bootstrap(&self, ct: &Ciphertext, test_poly: &SimdPolynomial) -> Ciphertext;
+    fn bootstrap(&self, ct: &Ciphertext, test_poly: &Polynomial) -> Ciphertext;
+
     fn modulus_switch(&self, ct: &Ciphertext) -> Ciphertext;
 }
