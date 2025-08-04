@@ -8,12 +8,12 @@ use rand::Rng;
 // QfheContext에 라이프타임 'a를 추가합니다.
 #[repr(C)]
 pub struct QfheContext<'a> {
-    backend: Box<dyn HardwareBackend<'a> + 'a>,
+    backend: Box<dyn HardwareBackend<'a, 'a, 'a> + 'a>,
     secret_key: SecretKey,
     relinearization_key: RelinearizationKey,
     bootstrap_key: BootstrapKey,
     keyswitching_key: KeySwitchingKey,
-    params: QfheParameters<'a>,
+    params: QfheParameters<'a, 'a, 'a>,
 }
 
 // QfheEngine 트레이트 구현부에도 라이프타임을 명시합니다.
@@ -51,12 +51,12 @@ impl<'a> QfheEngine<'a> for QfheContext<'a> {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qfhe_context_create(level: SecurityLevel) -> *mut QfheContext<'static> {
     let params = level.get_params();
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let rns_basis_size = params.modulus_q.len();
     
     let secret_key_vec = (0..params.module_dimension_k).map(|_| {
         let coeffs = (0..params.polynomial_degree).map(|_| {
-            let val: i128 = rng.gen_range(-1..=1);
+            let val: i128 = rng.random_range(-1..=1);
             let mut w = Vec::with_capacity(rns_basis_size);
             for &q_i in params.modulus_q {
                 w.push(val.rem_euclid(q_i as i128) as u64);

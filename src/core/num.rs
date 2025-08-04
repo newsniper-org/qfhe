@@ -1,31 +1,28 @@
 use std::ops::{Add, Mul, Rem, Sub};
 use std::cmp::{Ordering, Ord};
 
-pub trait SafeModuloArith<M = Self> : Add<Self> + Sub<Self> + Mul<Self> + Rem<M> {
+pub trait SafeModuloArith<M = Self> : Add<Self> + Sub<Self> + Mul<Self> + Rem<M> where Self : Sized {
     const MAXVAL: Self;
 
     // (a * b) mod m
-    const fn safe_mul_mod(self, rhs: Self, m: M) -> Self;
+    fn safe_mul_mod(self, rhs: Self, m: M) -> Self;
 
     // (a + b) mod m
-    const fn safe_add_mod(self, rhs: Self, m: M) -> Self;
+    fn safe_add_mod(self, rhs: Self, m: M) -> Self;
 
     // (a - b) mod m
-    const fn safe_sub_mod(self, rhs: Self, m: M) -> Self;
+    fn safe_sub_mod(self, rhs: Self, m: M) -> Self;
 }
 
 impl SafeModuloArith<Self> for u64 {
     const MAXVAL: Self = u64::MAX;
 
     // (a * b) mod m
-    const fn safe_mul_mod(self, rhs: Self, m: Self) -> Self {
-        let (low, high) = a.widening_mul(b);
-
-        let two_pow_64_mod_m = ((Self::MAXVAL % m) + 1u64) % m;
-        (((high % m) * two_pow_64_mod_m) % m + (low % m)) % m
+    fn safe_mul_mod(self, rhs: Self, m: Self) -> Self {
+        (concat64x2(self.widening_mul(rhs)) % (m as u128)) as u64        
     }
     // (a + b) mod m
-    const fn safe_add_mod(self, rhs: Self, m: Self) -> Self {
+    fn safe_add_mod(self, rhs: Self, m: Self) -> Self {
         let a_mod_m = self % m;
         let b_mod_m = rhs % m;
         let (wrapped, is_overflowing) = a_mod_m.overflowing_add(b_mod_m);
@@ -35,14 +32,10 @@ impl SafeModuloArith<Self> for u64 {
         ((wrapped % m) + processed_overflow) % m
     }
     // (a - b) mod m
-    const fn safe_sub_mod(self, rhs: Self, m: Self) -> Self {
+    fn safe_sub_mod(self, rhs: Self, m: Self) -> Self {
         let a_mod_m = self % m;
         let b_mod_m = rhs % m;
-        let result = match a_mod_m.cmp(&b_mod_m) {
-            Ordering::Equal => 0u64,
-            Ordering::Greater => a_mod_m - b_mod_m,
-            Ordering::Less => (m - b_mod_m) + a_mod_m
-        };
+        let result = if a_mod_m > b_mod_m { a_mod_m - b_mod_m } else if a_mod_m < b_mod_m { (m - b_mod_m) + a_mod_m } else { 0u64 };
         result
     }
 }

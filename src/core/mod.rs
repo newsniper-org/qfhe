@@ -7,7 +7,7 @@ pub use crate::core::polynomial::Polynomial;
 pub mod keys;
 pub use crate::core::keys::{SecretKey, RelinearizationKey, KeySwitchingKey, BootstrapKey};
 
-use crate::ntt::{power, primitive_root, BarrettReducer};
+use crate::ntt::{power, primitive_root, BarrettReducer64};
 
 pub mod rns;
 
@@ -22,7 +22,13 @@ pub mod ntt_tables;
 pub use crate::core::ntt_tables::{n1024, n2048};
 
 pub mod num;
-pub use core::num::*;
+pub use crate::core::num::{SafeModuloArith, concat64x2};
+
+pub(crate) mod u256;
+pub(crate) use crate::core::u256::U256;
+
+pub(crate) mod wide_arith;
+pub(crate) use crate::core::wide_arith::WideningArith;
 
 /// C FFI에서 사용할 보안 수준 열거형입니다.
 #[repr(C)]
@@ -123,6 +129,7 @@ pub struct QfheMinimalParameters<'a, 'b, 'c> {
 
 impl<'a, 'b, 'c> QfheMinimalParameters<'a, 'b, 'c> {
     pub const fn get_full_params(self) -> QfheParameters<'a, 'b, 'c> {
+        let one: usize = 1;
         QfheParameters {
             ntt_params: self.ntt_params,
             polynomial_degree: (one << self.log2_of_polynomial_degree),
@@ -151,7 +158,7 @@ impl SecurityLevel {
             SecurityLevel::L128 => QfheMinimalParameters {
                 module_dimension_k: 2,
                 log2_of_polynomial_degree: 10,
-                modulus_q: 1152921504606846883, // ~60-bit prime
+                modulus_q: &Q_128_BASIS,
                 modulus_chain: &MODULUS_CHAIN_128,
                 plaintext_modulus: 1 << 32,
                 scaling_factor_delta: 1152921504606846883 / (1 << 32),
@@ -164,7 +171,7 @@ impl SecurityLevel {
             SecurityLevel::L160 => QfheMinimalParameters {
                 module_dimension_k: 2,
                 log2_of_polynomial_degree: 10,
-                modulus_q: 1180591620717411303423, // ~70-bit prime
+                modulus_q: &Q_160_BASIS,
                 modulus_chain: &MODULUS_CHAIN_160,
                 plaintext_modulus: 1 << 32,
                 scaling_factor_delta: 1180591620717411303423 / (1 << 32),
@@ -177,7 +184,7 @@ impl SecurityLevel {
             SecurityLevel::L192 => QfheMinimalParameters {
                 module_dimension_k: 3,
                 log2_of_polynomial_degree: 10,
-                modulus_q: 1180591620717411303423, // ~70-bit prime
+                modulus_q: &Q_192_BASIS,
                 modulus_chain: &MODULUS_CHAIN_192,
                 plaintext_modulus: 1 << 32,
                 scaling_factor_delta: 1180591620717411303423 / (1 << 32),
@@ -190,7 +197,7 @@ impl SecurityLevel {
             SecurityLevel::L224 => QfheMinimalParameters {
                 module_dimension_k: 3,
                 log2_of_polynomial_degree: 11,
-                modulus_q: 340282366920938463463374607431768211293, // 125-bit prime
+                modulus_q: &Q_224_BASIS,
                 modulus_chain: &MODULUS_CHAIN_224,
                 plaintext_modulus: 1 << 64,
                 scaling_factor_delta: 340282366920938463463374607431768211293 / (1 << 64),
@@ -203,7 +210,7 @@ impl SecurityLevel {
             SecurityLevel::L256 => QfheMinimalParameters {
                 module_dimension_k: 4,
                 log2_of_polynomial_degree: 11,
-                modulus_q: 340282366920938463463374607431768211293, // 125-bit prime
+                modulus_q: &Q_256_BASIS,
                 modulus_chain: &MODULUS_CHAIN_256,
                 plaintext_modulus: 1 << 64,
                 scaling_factor_delta: 340282366920938463463374607431768211293 / (1 << 64),
@@ -235,7 +242,7 @@ pub struct GgswCiphertext {
 }
 
 /// 암호화, 복호화, 동형 연산을 위한 핵심 트레이트(trait)입니다.
-pub trait QfheEngine {
+pub trait QfheEngine<'a> {
     fn encrypt(&self, message: u64) -> Ciphertext;
     fn decrypt(&self, ciphertext: &Ciphertext) -> u64;
     fn homomorphic_add(&self, ct1: &Ciphertext, ct2: &Ciphertext) -> Ciphertext;

@@ -1,10 +1,11 @@
 // newsniper-org/qfhe/qfhe-wip-cpu-simple/src/ntt/mod.rs
 
-use crate::core::{Polynomial, Quaternion, QfheParameters, widening_mul_mod};
+use crate::core::{Polynomial, Quaternion, QfheParameters, SafeModuloArith};
 use crate::core::wide_arith::WideningArith;
 use rayon::prelude::*;
 
 pub mod qntt;
+use crate::core::concat64x2;
 
 
 // [수정] u64 연산을 위한 BarrettReducer
@@ -25,18 +26,26 @@ impl BarrettReducer64 {
     fn get_m_inv(m: u64) -> u128 {
         let max_u128 = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFu128;
         let (q, r) = (max_u128 / m as u128, max_u128 % m as u128);
-        if (r+1) == m {
+        if (r+1) == (m as u128) {
             q+1
         } else {
             q
         }
     }
 
+    
+    // [버그 수정] u128 전체 정밀도로 뺄셈을 수행하도록 수정
     #[inline(always)]
     pub fn reduce(&self, x: u128) -> u64 {
-        let q = x.widening_mul(self.m_inv).1 as u64;
-        let r = x as u64 - q.wrapping_mul(self.m);
-        if r >= self.m { r - self.m } else { r }
+        let q = x.widening_mul(self.m_inv).1; // q는 u128
+        let r = x.wrapping_sub(q.wrapping_mul(self.m as u128));
+        let mut result = r as u64; // 뺄셈 후에 u64로 변환
+
+        // 근사 오차 보정
+        while result >= self.m {
+            result -= self.m;
+        }
+        result
     }
 }
 
@@ -44,9 +53,9 @@ pub(crate) fn power(mut a: u64, mut b: u64, m: u64) -> u64 {
     let mut res = 1;
     a %= m;
     while b > 0 {
-        if b % 2 == 1 { res = (res as u128 * a as u128 % m as u128) as u64; }
+        if b % 2 == 1 { res = res.safe_mul_mod(a, m); }
         b >>= 1;
-        a = (a as u128 * a as u128 % m as u128) as u64;
+        a = a.safe_mul_mod(a, m);
     }
     res
 }
@@ -64,7 +73,6 @@ pub(crate) fn primitive_root(p: u64) -> u64 {
 
 // ntt_cooley_tukey_radix4 함수가 u64 슬라이스를 처리합니다.
 fn ntt_cooley_tukey_radix4(data: &mut [u64], n: usize, q: u64, w_primitive: u64, reducer: &BarrettReducer64) {
-    // 4진수 자릿수 역순 정렬
     let log4_n = n.trailing_zeros() / 2;
     for i in 0..n {
         let mut j = 0;
@@ -83,11 +91,13 @@ fn ntt_cooley_tukey_radix4(data: &mut [u64], n: usize, q: u64, w_primitive: u64,
     let mut len = 4;
     while len <= n {
         let w_len = power(w_primitive, (n / len) as u64, q);
-        data.chunks_mut(len).for_each(|chunk| {
+        // [버그 수정] par_chunks_mut을 순차적인 for 루프로 변경하여 중첩 병렬화 제거
+        for i in (0..n).step_by(len) {
+            let chunk = &mut data[i..i+len];
             let mut w1: u64 = 1;
             for j in 0..(len / 4) {
-                let w2 = reducer.reduce(w1 as u128 * w1 as u128);
-                let w3 = reducer.reduce(w1 as u128 * w2 as u128);
+                let w2 = reducer.reduce(concat64x2(w1.widening_mul(w1)));
+                let w3 = reducer.reduce(concat64x2(w1.widening_mul(w2)));
 
                 let idx0 = j;
                 let idx1 = idx0 + len / 4;
@@ -95,25 +105,25 @@ fn ntt_cooley_tukey_radix4(data: &mut [u64], n: usize, q: u64, w_primitive: u64,
                 let idx3 = idx2 + len / 4;
 
                 let u0 = chunk[idx0];
-                let u1 = reducer.reduce(chunk[idx1] as u128 * w1 as u128);
-                let u2 = reducer.reduce(chunk[idx2] as u128 * w2 as u128);
-                let u3 = reducer.reduce(chunk[idx3] as u128 * w3 as u128);
+                let u1 = reducer.reduce(concat64x2(chunk[idx1].widening_mul(w1)));
+                let u2 = reducer.reduce(concat64x2(chunk[idx2].widening_mul(w2)));
+                let u3 = reducer.reduce(concat64x2(chunk[idx3].widening_mul(w3)));
 
                 let t0 = (u0 + u2) % q;
                 let t1 = (u1 + u3) % q;
                 let t2 = (u0 + q - u2) % q;
                 let t3 = (u1 + q - u3) % q;
                 
-                let t3_times_im = reducer.reduce(t3 as u128 * im_factor as u128);
+                let t3_times_im = reducer.reduce(concat64x2(t3.widening_mul(im_factor)));
 
                 chunk[idx0] = (t0 + t1) % q;
                 chunk[idx1] = (t2 + q - t3_times_im) % q;
                 chunk[idx2] = (t0 + q - t1) % q;
                 chunk[idx3] = (t2 + t3_times_im) % q;
 
-                w1 = reducer.reduce(w1 as u128 * w_len as u128);
+                w1 = reducer.reduce(concat64x2(w1.widening_mul(w_len)));
             }
-        });
+        }
         len *= 4;
     }
 }
@@ -161,13 +171,13 @@ impl SoaPolynomial {
     }
 }
 
-pub trait Ntt {
-    fn ntt_forward(&self, params: &QfheParameters) -> Self;
-    fn ntt_inverse(&self, params: &QfheParameters) -> Self;
+pub trait Ntt<'a, 'b, 'c> {
+    fn ntt_forward(&mut self, params: &QfheParameters<'a, 'b, 'c>);
+    fn ntt_inverse(&mut self, params: &QfheParameters<'a, 'b, 'c>);
 }
 
-impl<'a> Ntt for Polynomial {
-    fn ntt_forward(&mut self, params: &QfheParameters<'a>) {
+impl<'a, 'b, 'c> Ntt<'a, 'b, 'c> for Polynomial {
+    fn ntt_forward(&mut self, params: &QfheParameters<'a, 'b, 'c>) {
         let n = params.polynomial_degree;
         let rns_basis_size = params.modulus_q.len();
 
@@ -215,7 +225,7 @@ impl<'a> Ntt for Polynomial {
         *self = soa_poly.to_aos(n, rns_basis_size);
     }
 
-    fn ntt_inverse(&mut self, params: &QfheParameters<'a>) {
+    fn ntt_inverse(&mut self, params: &QfheParameters<'a, 'b, 'c>) {
         let n = params.polynomial_degree;
         let rns_basis_size = params.modulus_q.len();
 
@@ -231,6 +241,8 @@ impl<'a> Ntt for Polynomial {
                     let w_inv_primitive = power(w_primitive, q - 2, q);
                     ntt_cooley_tukey_radix4(w_plane, n, q, w_inv_primitive, &reducer);
                 });
+            });
+            s.spawn(|_| {
                 soa_poly.x.par_iter_mut().enumerate().for_each(|(i, x_plane)| {
                     let q = params.modulus_q[i];
                     let reducer = BarrettReducer64::new(q);
@@ -239,6 +251,8 @@ impl<'a> Ntt for Polynomial {
                     let w_inv_primitive = power(w_primitive, q - 2, q);
                     ntt_cooley_tukey_radix4(x_plane, n, q, w_inv_primitive, &reducer);
                 });
+            });
+            s.spawn(|_| {
                 soa_poly.y.par_iter_mut().enumerate().for_each(|(i, y_plane)| {
                     let q = params.modulus_q[i];
                     let reducer = BarrettReducer64::new(q);
@@ -247,6 +261,8 @@ impl<'a> Ntt for Polynomial {
                     let w_inv_primitive = power(w_primitive, q - 2, q);
                     ntt_cooley_tukey_radix4(y_plane, n, q, w_inv_primitive, &reducer);
                 });
+            });
+            s.spawn(|_| {
                 soa_poly.z.par_iter_mut().enumerate().for_each(|(i, z_plane)| {
                     let q = params.modulus_q[i];
                     let reducer = BarrettReducer64::new(q);
@@ -256,7 +272,6 @@ impl<'a> Ntt for Polynomial {
                     ntt_cooley_tukey_radix4(z_plane, n, q, w_inv_primitive, &reducer);
                 });
             });
-            // ... (x, y, z components similarly) ...
         });
         
         *self = soa_poly.to_aos(n, rns_basis_size);
@@ -266,10 +281,10 @@ impl<'a> Ntt for Polynomial {
             for i in 0..rns_basis_size {
                 let q = params.modulus_q[i];
                 let n_inv = power(n as u64, q - 2, q);
-                coeff.w[i] = (widening_mul_mod(coeff.w[i], n_inv, q));
-                coeff.x[i] = (widening_mul_mod(coeff.x[i], n_inv, q));
-                coeff.y[i] = (widening_mul_mod(coeff.y[i], n_inv, q));
-                coeff.z[i] = (widening_mul_mod(coeff.z[i], n_inv, q));
+                coeff.w[i] = (coeff.w[i].safe_mul_mod(n_inv, q));
+                coeff.x[i] = (coeff.x[i].safe_mul_mod(n_inv, q));
+                coeff.y[i] = (coeff.y[i].safe_mul_mod(n_inv, q));
+                coeff.z[i] = (coeff.z[i].safe_mul_mod(n_inv, q));
             }
         });
     }

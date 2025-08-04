@@ -3,10 +3,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <inttypes.h> // For PRIu64 macro
-#include "../include/qfhe.h"
-
-typedef void QfheContext;
-typedef void Ciphertext;
+#include "include/qfhe.h"
 
 // 각 보안 수준에 대한 테스트를 실행하는 함수
 void run_demo_for_level(SecurityLevel level, const char* level_name) {
