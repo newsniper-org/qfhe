@@ -28,9 +28,15 @@ C_SOURCE := demo/main.c
 C_EXECUTABLE := main_demo_debug
 C_PATH := /usr/lib/gcc/x86_64-redhat-linux/15/include/
 
+# Python 3 executable
+PYTHON3_EXECUTABLE := pypy
+
 .PHONY: all build run clean
 
-all: run
+all: build run
+
+src/core/ntt_tables.rs:
+    $(PYTHON3_EXECUTABLE) devutils/gen_ntt_params.py
 
 # Build the Rust library and the C executable
 build: $(LIB_PATH)

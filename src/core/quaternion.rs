@@ -1,115 +1,24 @@
-use std::ops::{Add, Sub, Mul, Rem};
+// newsniper-org/qfhe/qfhe-wip-cpu-simple/src/core/quaternion.rs
 
-// QFHE의 기본 연산을 위한 4원수(Quaternion)를 정의합니다.
-#[derive(Clone, Debug, Copy)]
+use std::ops::{Add, Sub, Mul};
+
+// 각 쿼터니언 성분이 RNS 표현을 가집니다.
+#[derive(Clone, Debug, Default)]
 pub struct Quaternion {
-    pub w: u128,
-    pub x: u128,
-    pub y: u128,
-    pub z: u128,
+    pub w: Vec<u64>,
+    pub x: Vec<u64>,
+    pub y: Vec<u64>,
+    pub z: Vec<u64>,
 }
 
-
-// 4원수 연산 구현
 impl Quaternion {
-    pub fn new(w: u128, x: u128, y: u128, z: u128) -> Self {
-        Self { w, x, y, z }
-    }
-
-    pub fn zero() -> Self {
+    // RNS 기저 크기에 맞춰 0으로 초기화
+    pub fn zero(rns_basis_size: usize) -> Self {
         Self {
-            w: 0,
-            x: 0,
-            y: 0,
-            z: 0
+            w: vec![0; rns_basis_size],
+            x: vec![0; rns_basis_size],
+            y: vec![0; rns_basis_size],
+            z: vec![0; rns_basis_size],
         }
-    }
-
-    // u128 스칼라 값으로부터 4원수를 생성합니다.
-    pub fn from_scalar(s: u128) -> Self {
-        Quaternion { w: s, x: 0, y: 0, z: 0 }
-    }
-
-    pub fn add(self, other: Self) -> Self {
-        Self {
-            w: (self.w + other.w),
-            x: (self.x + other.x),
-            y: (self.y + other.y),
-            z: (self.z + other.z),
-        }
-    }
-
-    pub fn sub(self, other: Self) -> Self {
-        Self {
-            w: (self.w - other.w),
-            x: (self.x - other.x),
-            y: (self.y - other.y),
-            z: (self.z - other.z),
-        }
-    }
-
-    pub fn mul(self, other: Self) -> Self {
-        Self {
-            w: (self.w * other.w - self.x * other.x - self.y * other.y - self.z * other.z),
-            x: (self.w * other.x + self.x * other.w + self.y * other.z - self.z * other.y),
-            y: (self.w * other.y - self.x * other.z + self.y * other.w + self.z * other.x),
-            z: (self.w * other.z + self.x * other.y - self.y * other.x + self.z * other.w),
-        }
-    }
-    
-    pub fn scale(self, scalar: u128) -> Self {
-        Self {
-            w: (self.w * scalar),
-            x: (self.x * scalar),
-            y: (self.y * scalar),
-            z: (self.z * scalar),
-        }
-    }
-
-    pub fn rem(self, rhs: u128) -> Self {
-        Self {
-            w: (self.w % rhs),
-            x: (self.x % rhs),
-            y: (self.y % rhs),
-            z: (self.z % rhs),
-        }
-    }
-}
-
-impl Mul for Quaternion {
-    type Output = Self;
-
-    fn mul(self, rhs: Self) -> Self::Output {
-        Self::mul(self, rhs)
-    }
-}
-
-impl Add for Quaternion {
-    type Output = Self;
-
-    fn add(self, rhs: Self) -> Self::Output {
-        Self::add(self, rhs)
-    }
-}
-
-impl Sub for Quaternion {
-    type Output = Self;
-
-    fn sub(self, rhs: Self) -> Self::Output {
-        Self::sub(self, rhs)
-    }
-}
-
-impl Rem<u128> for Quaternion {
-    type Output = Self;
-
-    fn rem(self, rhs: u128) -> Self::Output {
-        Self::rem(self,rhs)
-    }
-}
-
-impl Default for Quaternion {
-    fn default() -> Self {
-        Self::zero()
     }
 }

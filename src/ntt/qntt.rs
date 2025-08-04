@@ -1,8 +1,10 @@
 // newsniper-org/qfhe/qfhe-0.0.3-fix/src/ntt/qntt.rs
 
 use crate::core::{Polynomial, Quaternion, QfheParameters};
-use super::{Ntt, BarrettReducer};
+use super::{Ntt, BarrettReducer64};
 use crypto_bigint::{U256, U512, Limb};
+
+use crate::core::num::{SafeModuloArith, concat64x2};
 
 pub struct SplitPolynomial {
     pub c1: Polynomial,
@@ -51,65 +53,55 @@ pub fn qntt_inverse(sp: &SplitPolynomial, params: &QfheParameters) -> Polynomial
     merge(&inv_sp)
 }
 
-pub fn qntt_pointwise_mul(p1: &SplitPolynomial, p2: &SplitPolynomial, params: &QfheParameters) -> SplitPolynomial {
-    let n = p1.c1.coeffs.len();
-    let q = params.modulus_q;
-    let q_u256: U256 = U256::from_u128(q);
-    let q_times_2_u512: U512 = U512::from_u128(q) << 1;
-    let mut res_c1 = Polynomial::zero(n);
-    let mut res_c2 = Polynomial::zero(n);
+pub fn qntt_pointwise_mul(p1: &mut Polynomial, p2: &Polynomial, params: &QfheParameters) {
+    let n = params.polynomial_degree;
+    let rns_basis_size = params.modulus_q.len();
 
-    let reducer = BarrettReducer::new(q);
+    // 각 RNS 모듈러스에 대해 병렬로 점별 곱셈 수행
+    (0..rns_basis_size).into_par_iter().for_each(|i| {
+        let q = params.modulus_q[i];
+        let reducer = BarrettReducer64::new(q);
+        for j in 0..n {
+            // c1a, c2a, c1b, c2b (split)
+            let c1a_w = p1.coeffs[j].w[i];
+            let c1a_x = p1.coeffs[j].x[i];
+            let c2a_w = p1.coeffs[j].y[i];
+            let c2a_x = p1.coeffs[j].z[i];
 
-    for i in 0..n {
-        let c1a_w = U256::from_u128(p1.c1.coeffs[i].w);
-        let c1a_x = U256::from_u128(p1.c1.coeffs[i].x);
-        let c2a_w = U256::from_u128(p1.c2.coeffs[i].w);
-        let c2a_x = U256::from_u128(p1.c2.coeffs[i].x);
+            let c1b_w = p2.coeffs[j].w[i];
+            let c1b_x = p2.coeffs[j].x[i];
+            let c2b_w = p2.coeffs[j].y[i];
+            let c2b_x = p2.coeffs[j].z[i];
 
-        let c1b_w = U256::from_u128(p2.c1.coeffs[i].w);
-        let c1b_x = U256::from_u128(p2.c1.coeffs[i].x);
-        let c2b_w = U256::from_u128(p2.c2.coeffs[i].w);
-        let c2b_x = U256::from_u128(p2.c2.coeffs[i].x);
+            // 켤레 복소수 계산
+            let c1b_conj_x = q - c1b_x;
+            let c2b_conj_x = q - c2b_x;
 
-        // --- 켤레 복소수 계산 (conjugate) ---
-        let c1b_conj_w = c1b_w;
-        let c1b_conj_x = q_u256.sub_mod(&c1b_x, &q_u256);
-        let c2b_conj_w = c2b_w;
-        let c2b_conj_x = q_u256.sub_mod(&c2b_x, &q_u256);
+            // c1_res = c1a*c1b - c2a*c2b_conj
+            let term1_w = reducer.reduce(concat64x2(c1a_w.widening_mul(c1b_w)) + (q as u128) - concat64x2(c1a_x.widening_mul(c1b_x)));
+            let term1_x = reducer.reduce(concat64x2(c1a_w.widening_mul(c1b_x)) + (concat64x2(c1a_x.widening_mul(c1b_w))));
+            // [버그 수정] c1b -> c2b_conj
+            let term2_w = reducer.reduce(concat64x2(c2a_w.widening_mul(c2b_w)) + (q as u128) - concat64x2(c2a_x.widening_mul(c2b_conj_x)));
+            let term2_x = reducer.reduce(concat64x2(c2a_w.widening_mul(c2b_conj_x)) + concat64x2(c2a_x.widening_mul(c2b_w)));
+            
+            let res_c1_w = term1_w.safe_sub_mod(term2_w, q);
+            let res_c1_x = term1_x.safe_sub_mod(term2_x, q);
+            
+            // c2_res = c1a*c2b + c2a*c1b_conj
+            let term3_w = reducer.reduce(concat64x2(c1a_w.widening_mul(c2b_w)) + (q as u128) - concat64x2(c1a_x.widening_mul(c2b_x)));
+            let term3_x = reducer.reduce(concat64x2(c1a_w.widening_mul(c2b_x)) + concat64x2(c1a_x.widening_mul(c2b_w)));
+            // [버그 수정] c1b -> c1b_conj
+            let term4_w = reducer.reduce(concat64x2(c2a_w.widening_mul(c1b_w)) + (q as u128) - concat64x2(c2a_x.widening_mul(c1b_conj_x)));
+            let term4_x = reducer.reduce(concat64x2(c2a_w.widening_mul(c1b_conj_x)) + concat64x2(c2a_x.widening_mul(c1b_w)));
 
-        // --- c1_res = c1a*c1b - c2a*c2b_conj 계산 ---
-        // term1 = c1a * c1b
-        let t1_w_full = c1a_w.widening_mul(&c1b_w);
-        let t1_x_full = c1a_x.widening_mul(&c1b_x);
-        let term1_w = reducer.reduce(t1_w_full.wrapping_add(&q_times_2_u512).wrapping_sub(&t1_x_full).resize());
-        let term1_x = reducer.reduce(c1a_w.widening_mul(&c1b_x).wrapping_add(&c1a_x.widening_mul(&c1b_w)).resize());
+            let res_c2_w = term3_w.safe_add_mod(term4_w, q);
+            let res_c2_x = term3_x.safe_add_mod(term4_x, q);
 
-        // term2 = c2a * c2b_conj
-        let t2_w_full = c2a_w.widening_mul(&c2b_conj_w);
-        let t2_x_full = c2a_x.widening_mul(&c2b_conj_x);
-        let term2_w = reducer.reduce(t2_w_full.wrapping_add(&q_times_2_u512).wrapping_sub(&t2_x_full).resize());
-        let term2_x = reducer.reduce(c2a_w.widening_mul(&c2b_conj_x).wrapping_add(&c2a_x.widening_mul(&c2b_conj_w)).resize());
-        
-        res_c1.coeffs[i].w = (term1_w + q - term2_w) % q;
-        res_c1.coeffs[i].x = (term1_x + q - term2_x) % q;
-
-        // --- c2_res = c1a*c2b + c2a*c1b_conj 계산 ---
-        // term3 = c1a * c2b
-        let t3_w_full = c1a_w.widening_mul(&c2b_w);
-        let t3_x_full = c1a_x.widening_mul(&c2b_x);
-        let term3_w = reducer.reduce(t3_w_full.wrapping_add(&q_times_2_u512).wrapping_sub(&t3_x_full).resize());
-        let term3_x = reducer.reduce(c1a_w.widening_mul(&c2b_x).wrapping_add(&c1a_x.widening_mul(&c2b_w)).resize());
-
-        // term4 = c2a * c1b_conj
-        let t4_w_full = c2a_w.widening_mul(&c1b_conj_w);
-        let t4_x_full = c2a_x.widening_mul(&c1b_conj_x);
-        let term4_w = reducer.reduce(t4_w_full.wrapping_add(&q_times_2_u512).wrapping_sub(&t4_x_full).resize());
-        let term4_x = reducer.reduce(c2a_w.widening_mul(&c1b_conj_x).wrapping_add(&c2a_x.widening_mul(&c1b_conj_w)).resize());
-        
-        res_c2.coeffs[i].w = (term3_w + term4_w) % q;
-        res_c2.coeffs[i].x = (term3_x + term4_x) % q;
-    }
-    
-    SplitPolynomial { c1: res_c1, c2: res_c2 }
+            // 결과(merge)를 p1에 다시 저장
+            p1.coeffs[j].w[i] = res_c1_w;
+            p1.coeffs[j].x[i] = res_c1_x;
+            p1.coeffs[j].y[i] = res_c2_w;
+            p1.coeffs[j].z[i] = res_c2_x;
+        }
+    });
 }

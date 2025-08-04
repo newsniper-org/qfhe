@@ -2,6 +2,7 @@ use crate::core::{
     Ciphertext, Polynomial, Quaternion, SecretKey, QfheParameters, RelinearizationKey,
     KeySwitchingKey, BootstrapKey, GgswCiphertext
 };
+use crate::core::rns::*;
 use super::HardwareBackend;
 use rand::Rng;
 use rand_distr::{Normal, Distribution};
@@ -68,37 +69,51 @@ fn mul_mod(mut a: u128, mut b: u128, m: u128) -> u128 {
     res
 }
 
-impl CpuBackend {
-    fn encrypt_poly(&self, msg_poly: &Polynomial, params: &QfheParameters, secret_key: &SecretKey) -> Ciphertext {
-        let mut rng = rand::rng();
+impl<'a, 'b, 'c> CpuBackend {
+    // ... (이 함수는 RNS 기반으로 수정이 필요합니다) ...
+    fn encrypt_poly(msg_poly: &Polynomial, params: &QfheParameters, secret_key: &SecretKey) -> Ciphertext {
+        let mut rng = rand::thread_rng();
         let k = params.module_dimension_k;
+        let n = params.polynomial_degree;
+        let rns_basis = params.modulus_q;
+        let rns_basis_size = rns_basis.len();
 
         let a_vec = (0..k).map(|_| {
-            let coeffs = (0..params.polynomial_degree).map(|_| Quaternion {
-                w: rng.random_range(0..params.modulus_q), x: 0, y: 0, z: 0,
-            }).collect();
-            Polynomial { coeffs }
+            let mut poly = Polynomial::zero(n, rns_basis_size);
+            for i in 0..n {
+                for j in 0..rns_basis_size {
+                    poly.coeffs[i].w[j] = rng.gen_range(0..rns_basis[j]);
+                }
+            }
+            poly
         }).collect::<Vec<_>>();
 
-        let e_coeffs = (0..params.polynomial_degree).map(|_| Quaternion {
-            w: sample_discrete_gaussian(params.noise_std_dev).rem_euclid(params.modulus_q as i128) as u128,
-            x: 0, y: 0, z: 0,
-        }).collect();
-        let e_poly = Polynomial { coeffs: e_coeffs };
-        
-        let mut as_poly = Polynomial::zero(params.polynomial_degree);
+        let e_poly = {
+            let mut poly = Polynomial::zero(n, rns_basis_size);
+            for i in 0..n {
+                let noise = sample_discrete_gaussian(params.noise_std_dev) as u128;
+                // This needs proper RNS conversion for large noise
+                for j in 0..rns_basis_size {
+                    poly.coeffs[i].w[j] = (noise % rns_basis[j] as u128) as u64;
+                }
+            }
+            poly
+        };
+
+        let backend = CpuBackend;
+        let mut as_poly = Polynomial::zero(n, rns_basis_size);
         for i in 0..k {
-            let product = self.polynomial_mul(&a_vec[i], &secret_key.0[i], params);
-            as_poly = self.polynomial_add(&as_poly, &product, params);
+            let product = backend.polynomial_mul(&a_vec[i], &secret_key.0[i], params);
+            as_poly = backend.polynomial_add(&as_poly, &product, params);
         }
-        
-        let b_poly = self.polynomial_add(&as_poly, &e_poly, params);
-        let b_poly = self.polynomial_add(&b_poly, &msg_poly, params);
+
+        let b_poly = backend.polynomial_add(&as_poly, &e_poly, params);
+        let b_poly = backend.polynomial_add(&b_poly, msg_poly, params);
 
         Ciphertext { a_vec, b: b_poly, modulus_level: 0 }
     }
 
-    fn decompose(&self, poly: &Polynomial, params: &QfheParameters) -> Vec<Polynomial> {
+    fn decompose(&self, poly: &Polynomial, params: &QfheParameters<'a, 'b, 'c>) -> Vec<Polynomial> {
         let base = params.gadget_base_b;
         let levels = params.gadget_levels_l;
         let n = params.polynomial_degree;
@@ -119,7 +134,7 @@ impl CpuBackend {
         result_levels
     }
 
-    fn external_product(&self, ggsw: &GgswCiphertext, ct: &Ciphertext, params: &QfheParameters) -> Ciphertext {
+    fn external_product(&self, ggsw: &GgswCiphertext, ct: &Ciphertext, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext {
         // ◀◀ 레벨 일치 여부 검사
         // GGSW 암호문이 비어있지 않은지 확인하고, 첫 번째 암호문의 레벨을 기준으로 비교합니다.
         if let Some(first_ggsw_level_ct) = ggsw.levels.first() {
@@ -164,38 +179,68 @@ impl CpuBackend {
         println!("[Info] external_product: 연산 완료.");
         Ciphertext { a_vec: res_a_vec, b: res_b, modulus_level: ct.modulus_level }
     }
+
+    fn polynomial_scalar_mul(p: &Polynomial, scalar: u128, params: &QfheParameters<'a, 'b, 'c>) -> Polynomial {
+        // ... (이 함수는 RNS 기반으로 수정이 필요합니다) ...
+        p.clone() // Placeholder
+    }
 }
 
+fn polynomial_scalar_mul(p: &Polynomial, scalar: u128, params: &QfheParameters) -> Polynomial {
+    let n = params.polynomial_degree;
+    let rns_basis_size = params.modulus_q.len();
+    let mut res = Polynomial::zero(n, rns_basis_size);
 
+    for i in 0..n {
+        for j in 0..rns_basis_size {
+            let q_j = params.modulus_q[j];
+            let reducer = BarrettReducer64::new(q_j);
+            res.coeffs[i].w[j] = reducer.reduce(p.coeffs[i].w[j] as u128 * scalar);
+            res.coeffs[i].x[j] = reducer.reduce(p.coeffs[i].x[j] as u128 * scalar);
+            res.coeffs[i].y[j] = reducer.reduce(p.coeffs[i].y[j] as u128 * scalar);
+            res.coeffs[i].z[j] = reducer.reduce(p.coeffs[i].z[j] as u128 * scalar);
+        }
+    }
+    res
+}
 
-impl HardwareBackend for CpuBackend {
-    fn encrypt(&self, message: u64, params: &QfheParameters, secret_key: &SecretKey) -> Ciphertext {
-        let mut rng = rand::rng();
+impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
+    // [수정] RNS 기반 암호화
+    fn encrypt(&self, message: u64, params: &QfheParameters<'a, 'b, 'c>, secret_key: &SecretKey) -> Ciphertext {
+        let n = params.polynomial_degree;
         let k = params.module_dimension_k;
+        let rns_basis = params.modulus_q;
+        let rns_basis_size = rns_basis.len();
 
-        // 1. a_vec: k개의 무작위 다항식 벡터 생성
+        // a_vec: 무작위 다항식 벡터 생성 (RNS 형태)
         let a_vec = (0..k).map(|_| {
-            let coeffs = (0..params.polynomial_degree).map(|_| Quaternion {
-                w: rng.random_range(0..params.modulus_q), x: 0, y: 0, z: 0,
-            }).collect();
-            Polynomial { coeffs }
+            let mut poly = Polynomial::zero(n, rns_basis_size);
+            for i in 0..n {
+                for j in 0..rns_basis_size {
+                    poly.coeffs[i].w[j] = rand::thread_rng().gen_range(0..rns_basis[j]);
+                }
+            }
+            poly
         }).collect::<Vec<_>>();
 
-        // 2. e: 작은 오차 다항식 생성
-        let e_coeffs = (0..params.polynomial_degree).map(|_| Quaternion {
-            w: sample_discrete_gaussian(params.noise_std_dev).rem_euclid(params.modulus_q as i128) as u128,
-            x: 0, y: 0, z: 0,
-        }).collect();
-        let e_poly = Polynomial { coeffs: e_coeffs };
-        
-        // 3. m: 메시지 인코딩
-        let mut scaled_m_coeffs = vec![Quaternion::default(); params.polynomial_degree];
-        let plaintext_mask = params.plaintext_modulus - 1;
-        scaled_m_coeffs[0] = Quaternion::from_scalar(((message as u128) & plaintext_mask) * params.scaling_factor_delta);
-        let scaled_m_poly = Polynomial { coeffs: scaled_m_coeffs };
+        // e: 작은 오차 다항식 생성 (RNS 형태)
+        let e_poly = {
+            let mut poly = Polynomial::zero(n, rns_basis_size);
+            for i in 0..n {
+                let noise = sample_discrete_gaussian(params.noise_std_dev) as u128;
+                poly.coeffs[i].w = integer_to_rns(noise, rns_basis);
+            }
+            poly
+        };
 
-        // 4. b = <a, s> + e + m 계산
-        let mut as_poly = Polynomial::zero(params.polynomial_degree);
+        // m: 메시지 인코딩 (RNS 형태)
+        let mut scaled_m_poly = Polynomial::zero(n, rns_basis_size);
+        let plaintext_mask = params.plaintext_modulus - 1;
+        let scaled_message = ((message as u128) & plaintext_mask) * params.scaling_factor_delta;
+        scaled_m_poly.coeffs[0].w = integer_to_rns(scaled_message, rns_basis);
+        
+        // b = <a, s> + e + m 계산
+        let mut as_poly = Polynomial::zero(n, rns_basis_size);
         for i in 0..k {
             let product = self.polynomial_mul(&a_vec[i], &secret_key.0[i], params);
             as_poly = self.polynomial_add(&as_poly, &product, params);
@@ -207,69 +252,95 @@ impl HardwareBackend for CpuBackend {
         Ciphertext { a_vec, b: b_poly, modulus_level: 0 }
     }
 
-    fn decrypt(&self, ciphertext: &Ciphertext, params: &QfheParameters, secret_key: &SecretKey) -> u64 {
+    // [수정] RNS 기반 복호화
+    fn decrypt(&self, ciphertext: &Ciphertext, params: &QfheParameters<'a, 'b, 'c>, secret_key: &SecretKey) -> u64 {
+        let n = params.polynomial_degree;
         let k = params.module_dimension_k;
-        
-        // 1. <a, s> 계산
-        let mut as_poly = Polynomial::zero(params.polynomial_degree);
+        let rns_basis = params.modulus_q;
+
+        // <a, s> 계산
+        let mut as_poly = Polynomial::zero(n, rns_basis.len());
         for i in 0..k {
             let product = self.polynomial_mul(&ciphertext.a_vec[i], &secret_key.0[i], params);
             as_poly = self.polynomial_add(&as_poly, &product, params);
         }
 
-        // 2. m' = b - <a, s>
+        // m' = b - <a, s> (RNS 상에서)
         let m_prime_poly = self.polynomial_sub(&ciphertext.b, &as_poly, params);
-        let noisy_message = m_prime_poly.coeffs[0].w;
+        
+        // 첫 번째 계수의 RNS 표현을 가져옴
+        let noisy_message_rns = &m_prime_poly.coeffs[0].w;
 
-        // 3. 디코딩
+        // CRT를 사용하여 RNS 표현을 큰 정수로 복원
+        let noisy_message = rns_to_integer(noisy_message_rns, rns_basis);
+
+        // 디코딩
         let half_delta = params.scaling_factor_delta / 2;
-        let rounded_val = add_mod(noisy_message, half_delta, params.modulus_q);
+        // 전체 모듈러스 Q에 대한 연산
+        let q_product = rns_basis.iter().fold(1u128, |acc, &m| acc.wrapping_mul(m as u128));
+        let rounded_val = (noisy_message + half_delta) % q_product;
+        
         (rounded_val / params.scaling_factor_delta) as u64
     }
 
-    fn polynomial_add(&self, p1: &Polynomial, p2: &Polynomial, params: &QfheParameters) -> Polynomial {
-        let mut result_coeffs = Vec::with_capacity(params.polynomial_degree);
-        let zero = Quaternion::default();
-        for i in 0..params.polynomial_degree {
-            let q1 = p1.coeffs.get(i).unwrap_or(&zero);
-            let q2 = p2.coeffs.get(i).unwrap_or(&zero);
-            result_coeffs.push(Quaternion {
-                w: add_mod(q1.w, q2.w, params.modulus_q), x: add_mod(q1.x, q2.x, params.modulus_q),
-                y: add_mod(q1.y, q2.y, params.modulus_q), z: add_mod(q1.z, q2.z, params.modulus_q),
-            });
-        }
-        Polynomial { coeffs: result_coeffs }
-    }
+    // [수정] RNS 기반 다항식 덧셈
+    fn polynomial_add(&self, p1: &Polynomial, p2: &Polynomial, params: &QfheParameters<'a, 'b, 'c>) -> Polynomial {
+        let n = params.polynomial_degree;
+        let rns_basis_size = params.modulus_q.len();
+        let mut res = Polynomial::zero(n, rns_basis_size);
 
-    fn polynomial_sub(&self, p1: &Polynomial, p2: &Polynomial, params: &QfheParameters) -> Polynomial {
-        let mut result_coeffs = Vec::with_capacity(params.polynomial_degree);
-        let zero = Quaternion::default();
-        for i in 0..params.polynomial_degree {
-            let q1 = p1.coeffs.get(i).unwrap_or(&zero);
-            let q2 = p2.coeffs.get(i).unwrap_or(&zero);
-            let w = sub_mod(q1.w, q2.w, params.modulus_q);
-            let x = sub_mod(q1.x, q2.x, params.modulus_q);
-            let y = sub_mod(q1.y, q2.y, params.modulus_q);
-            let z = sub_mod(q1.z, q2.z, params.modulus_q);
-            result_coeffs.push(Quaternion { w, x, y, z });
-        }
-        Polynomial { coeffs: result_coeffs }
-    }
-
-    fn polynomial_mul(&self, p1: &Polynomial, p2: &Polynomial, params: &QfheParameters) -> Polynomial {
-        let mut result = Polynomial::zero(params.polynomial_degree);
-        for i in 0..params.polynomial_degree {
-            for j in 0..params.polynomial_degree {
-                if p1.coeffs[i].w == 0 { continue; }
-                let index = (i + j) % params.polynomial_degree;
-                let val = mul_mod(p1.coeffs[i].w, p2.coeffs[j].w, params.modulus_q);
-                result.coeffs[index].w = add_mod(result.coeffs[index].w, val, params.modulus_q);
+        for i in 0..n {
+            for j in 0..rns_basis_size {
+                let q_j = params.modulus_q[j];
+                res.coeffs[i].w[j] = (p1.coeffs[i].w[j] + p2.coeffs[i].w[j]) % q_j;
+                res.coeffs[i].x[j] = (p1.coeffs[i].x[j] + p2.coeffs[i].x[j]) % q_j;
+                res.coeffs[i].y[j] = (p1.coeffs[i].y[j] + p2.coeffs[i].y[j]) % q_j;
+                res.coeffs[i].z[j] = (p1.coeffs[i].z[j] + p2.coeffs[i].z[j]) % q_j;
             }
         }
-        result
+        res
+    }
+
+    // [수정] RNS 기반 다항식 뺄셈
+    fn polynomial_sub(&self, p1: &Polynomial, p2: &Polynomial, params: &QfheParameters<'a, 'b, 'c>) -> Polynomial {
+        let n = params.polynomial_degree;
+        let rns_basis_size = params.modulus_q.len();
+        let mut res = Polynomial::zero(n, rns_basis_size);
+
+        for i in 0..n {
+            for j in 0..rns_basis_size {
+                let q_j = params.modulus_q[j];
+                res.coeffs[i].w[j] = (p1.coeffs[i].w[j] + q_j - p2.coeffs[i].w[j]) % q_j;
+                res.coeffs[i].x[j] = (p1.coeffs[i].x[j] + q_j - p2.coeffs[i].x[j]) % q_j;
+                res.coeffs[i].y[j] = (p1.coeffs[i].y[j] + q_j - p2.coeffs[i].y[j]) % q_j;
+                res.coeffs[i].z[j] = (p1.coeffs[i].z[j] + q_j - p2.coeffs[i].z[j]) % q_j;
+            }
+        }
+        res
+    }
+
+    // [수정] RNS 기반 다항식 곱셈
+    fn polynomial_mul(&self, p1: &Polynomial, p2: &Polynomial, params: &QfheParameters<'a, 'b, 'c>) -> Polynomial {
+        // QNTT 함수들이 in-place로 동작하므로, 입력 다항식을 복제합니다.
+        let mut p1_ntt = p1.clone();
+        let p2_ntt = p2.clone(); // p2는 수정되지 않으므로 mut이 필요 없음
+
+        // 1. 순방향 QNTT
+        qntt_forward(&mut p1_ntt, params);
+        // p2도 변환해야 하지만, qntt_forward가 mut을 받으므로 임시 변수 사용
+        let mut p2_ntt_mut = p2_ntt;
+        qntt_forward(&mut p2_ntt_mut, params);
+
+        // 2. 점별 곱셈
+        qntt_pointwise_mul(&mut p1_ntt, &p2_ntt_mut, params);
+
+        // 3. 역방향 QNTT
+        qntt_inverse(&mut p1_ntt, params);
+
+        p1_ntt
     }
     
-    fn homomorphic_add(&self, ct1: &Ciphertext, ct2: &Ciphertext, params: &QfheParameters) -> Ciphertext {
+    fn homomorphic_add(&self, ct1: &Ciphertext, ct2: &Ciphertext, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext {
         assert_eq!(ct1.modulus_level, ct2.modulus_level, "Ciphertexts must have the same modulus level for addition.");
         let k = params.module_dimension_k;
         let a_vec_add = (0..k)
@@ -279,7 +350,7 @@ impl HardwareBackend for CpuBackend {
         Ciphertext { a_vec: a_vec_add, b: b_add, modulus_level: ct1.modulus_level }
     }
 
-    fn homomorphic_sub(&self, ct1: &Ciphertext, ct2: &Ciphertext, params: &QfheParameters) -> Ciphertext {
+    fn homomorphic_sub(&self, ct1: &Ciphertext, ct2: &Ciphertext, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext {
         assert_eq!(ct1.modulus_level, ct2.modulus_level, "Ciphertexts must have the same modulus level for subtraction.");
         let k = params.module_dimension_k;
         let a_vec_sub = (0..k)
@@ -290,62 +361,98 @@ impl HardwareBackend for CpuBackend {
     }
 
 
-
-
-    fn generate_relinearization_key(&self, secret_key: &SecretKey, params: &QfheParameters) -> RelinearizationKey {
-        // 비밀키의 제곱(s_i * s_j)을 암호화하여 재선형화 키를 생성합니다.
-        // 구현의 편의를 위해 k*k개의 모든 조합 대신, s_0^2, s_1^2, ... 등 일부만 생성합니다.
+    // [수정] 모든 s_i * s_j 조합을 암호화하도록 재선형화 키 생성 업데이트
+    fn generate_relinearization_key(&self, secret_key: &SecretKey, params: &QfheParameters<'a, 'b, 'c>) -> RelinearizationKey {
         let k = params.module_dimension_k;
-        let mut key_vec = Vec::with_capacity(k);
-
+        let mut key_vec = Vec::with_capacity(k * k);
         for i in 0..k {
-            let s_squared = self.polynomial_mul(&secret_key.0[i], &secret_key.0[i], params);
-            // 여기에 plaintext_modulus (t)를 곱하는 등 스케일링 과정이 필요하지만 단순화함.
-            key_vec.push(self.encrypt_poly(&s_squared, params, secret_key));
+            for j in 0..k {
+                // 1. 비밀키의 곱(s_i * s_j)을 RNS 상에서 계산
+                let s_i_s_j = self.polynomial_mul(&secret_key.0[i], &secret_key.0[j], params);
+                
+                // 2. s_i * s_j를 암호화하여 키를 생성
+                key_vec.push(encrypt_poly(&s_i_s_j, params, secret_key));
+            }
         }
-
         RelinearizationKey(key_vec)
     }
 
-    fn homomorphic_mul(&self, ct1: &Ciphertext, ct2: &Ciphertext, rlk: &RelinearizationKey, params: &QfheParameters) -> Ciphertext {
+    // [수정] RNS 기반 동형 곱셈 (재선형화 포함)
+    fn homomorphic_mul(&self, ct1: &Ciphertext, ct2: &Ciphertext, rlk: &RelinearizationKey, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext {
         assert_eq!(ct1.modulus_level, ct2.modulus_level, "Ciphertexts must have the same modulus level for multiplication.");
-        // 1. 암호문 곱셈 (Tensor Product)
-        // ct_new = (c0, c1, c2) 형태의 2차 암호문 생성.
-        // c0 = b1*b2, c1 = a1*b2 + b1*a2, c2 = a1*a2
-        // 실제로는 스케일링(t/q)이 필요하지만 개념적 흐름을 위해 생략.
-        let k = params.module_dimension_k;
-        let c0 = self.polynomial_mul(&ct1.b, &ct2.b, params);
         
-        let mut c1 = vec![Polynomial::zero(params.polynomial_degree); k];
-        let mut c2 = vec![Polynomial::zero(params.polynomial_degree); k]; // s_i*s_j 항에 대응
+        let k = params.module_dimension_k;
+        let n = params.polynomial_degree;
+        let rns_basis_size = params.modulus_q.len();
+        let base = params.gadget_base_b;
+        let levels = params.gadget_levels_l;
 
+        // 1. 텐서 곱 계산
+        let c0 = self.polynomial_mul(&ct1.b, &ct2.b, params);
+        let mut c1 = vec![Polynomial::zero(n, rns_basis_size); k];
         for i in 0..k {
-            let a1_b2 = self.polynomial_mul(&ct1.a_vec[i], &ct2.b, params);
-            let a2_b1 = self.polynomial_mul(&ct2.a_vec[i], &ct1.b, params);
-            c1[i] = self.polynomial_add(&a1_b2, &a2_b1, params);
-            c2[i] = self.polynomial_mul(&ct1.a_vec[i], &ct2.a_vec[i], params);
+            let a1i_b2 = self.polynomial_mul(&ct1.a_vec[i], &ct2.b, params);
+            let b1_a2i = self.polynomial_mul(&ct1.b, &ct2.a_vec[i], params);
+            c1[i] = self.polynomial_add(&a1i_b2, &b1_a2i, params);
+        }
+        let mut c2 = vec![vec![Polynomial::zero(n, rns_basis_size); k]; k];
+        for i in 0..k {
+            for j in 0..k {
+                c2[i][j] = self.polynomial_mul(&ct1.a_vec[i], &ct2.a_vec[j], params);
+            }
         }
 
-        // 2. 재선형화 (Relinearization)
-        // c2 항을 재선형화 키를 사용해 1차항으로 변환.
-        // new_ct = (c0, c1) + relin_key * c2
-        let mut new_b = c0;
-        let mut new_a_vec = c1;
+        // 2. 재선형화(Relinearization) 과정
+        let mut c2_prime_b = Polynomial::zero(n, rns_basis_size);
+        let mut c2_prime_a = vec![Polynomial::zero(n, rns_basis_size); k];
 
         for i in 0..k {
-            let rlk_a_mul_c2 = self.polynomial_mul(&rlk.0[i].a_vec[0], &c2[i], params); // rlk가 k=1 기준으로 생성됨
-            let rlk_b_mul_c2 = self.polynomial_mul(&rlk.0[i].b, &c2[i], params);
-            
-            new_a_vec[i] = self.polynomial_add(&new_a_vec[i], &rlk_a_mul_c2, params);
-            new_b = self.polynomial_add(&new_b, &rlk_b_mul_c2, params);
-        }
+            for j in 0..k {
+                let c2_poly = &c2[i][j];
+                // c2_{ij}를 가젯 분해하여 재선형화 키와 내적
+                for rns_idx in 0..rns_basis_size {
+                    for coeff_idx in 0..n {
+                        let mut coeff_val = c2_poly.coeffs[coeff_idx].w[rns_idx] as u128;
+                        for l in 0..levels {
+                            let decomposed_val = coeff_val % base;
+                            coeff_val /= base;
+                            if decomposed_val == 0 { continue; }
 
-        Ciphertext { a_vec: new_a_vec, b: new_b, modulus_level: ct1.modulus_level }
+                            let rlk_index = (i * k + j) * levels + l; // This indexing needs to be more complex
+                            if rlk_index >= rlk.0.len() { continue; }
+                            
+                            let rlk_ct = &rlk.0[rlk_index];
+
+                            let term_b = polynomial_scalar_mul(&rlk_ct.b, decomposed_val, params);
+                            c2_prime_b = self.polynomial_add(&c2_prime_b, &term_b, params);
+
+                            for m in 0..k {
+                                let term_a = polynomial_scalar_mul(&rlk_ct.a_vec[m], decomposed_val, params);
+                                c2_prime_a[m] = self.polynomial_add(&c2_prime_a[m], &term_a, params);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // 3. 최종 암호문 결합
+        let final_b = self.polynomial_add(&c0, &c2_prime_b, params);
+        let mut final_a = vec![Polynomial::zero(n, rns_basis_size); k];
+        for i in 0..k {
+            final_a[i] = self.polynomial_add(&c1[i], &c2_prime_a[i], params);
+        }
+        
+        Ciphertext {
+            a_vec: final_a,
+            b: final_b,
+            modulus_level: ct1.modulus_level,
+        }
     }
 
 
-
-    fn generate_keyswitching_key(&self, old_key: &SecretKey, new_key: &SecretKey, params: &QfheParameters) -> KeySwitchingKey {
+    // ... (이 함수는 RNS 기반으로 수정이 필요합니다) ...
+    fn generate_keyswitching_key(&self, old_key: &SecretKey, new_key: &SecretKey, params: &QfheParameters<'a, 'b, 'c>) -> KeySwitchingKey {
         // [완전 구현] 가젯 분해(Gadget Decomposition)를 사용한 키 스위칭 키 생성
         let k = params.module_dimension_k;
         let n = params.polynomial_degree;
@@ -377,7 +484,8 @@ impl HardwareBackend for CpuBackend {
         KeySwitchingKey { key: ksk_outer_vec }
     }
 
-    fn generate_bootstrap_key(&self, secret_key: &SecretKey, params: &QfheParameters) -> BootstrapKey {
+    // ... (이 함수는 RNS 기반으로 수정이 필요합니다) ...
+    fn generate_bootstrap_key(&self, secret_key: &SecretKey, params: &QfheParameters<'a, 'b, 'c>) -> BootstrapKey {
         // [완전 구현] MLWE 비밀키를 GGSW 암호문으로 암호화하여 부트스트래핑 키 생성
         let base = params.gadget_base_b;
         let levels = params.gadget_levels_l;
@@ -407,7 +515,8 @@ impl HardwareBackend for CpuBackend {
         BootstrapKey { ggsw_vector: bsk_ggsw_vector }
     }
 
-    fn bootstrap(&self, ct: &Ciphertext, test_poly: &Polynomial, bsk: &BootstrapKey, ksk: &KeySwitchingKey, params: &QfheParameters) -> Ciphertext {
+    // ... (이 함수는 RNS 기반으로 수정이 필요합니다) ...
+    fn bootstrap(&self, ct: &Ciphertext, test_poly: &Polynomial, bsk: &BootstrapKey, ksk: &KeySwitchingKey, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext {
         // [구체화] 프로그래머블 부트스트래핑의 완전한 흐름
         println!("[Info] bootstrap: 부트스트래핑 프로세스 시작.");
 
@@ -453,7 +562,8 @@ impl HardwareBackend for CpuBackend {
         refreshed_ct
     }
 
-    fn keyswitch(&self, ct: &Ciphertext, ksk: &KeySwitchingKey, params: &QfheParameters) -> Ciphertext {
+    // ... (이 함수는 RNS 기반으로 수정이 필요합니다) ...
+    fn keyswitch(&self, ct: &Ciphertext, ksk: &KeySwitchingKey, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext {
         // ksk의 첫 번째 암호문과 ct의 레벨을 비교하여 일치하는지 검사
         if !ksk.key.is_empty() && !ksk.key[0].is_empty() {
             assert_eq!(ct.modulus_level, ksk.key[0][0].modulus_level, "Ciphertext and KeySwitchingKey must have the same modulus level.");
@@ -502,7 +612,8 @@ impl HardwareBackend for CpuBackend {
         new_ct
     }
 
-    fn modulus_switch(&self, ct: &Ciphertext, params: &QfheParameters<'_>) -> Ciphertext {
+    // ... (이 함수는 RNS 기반으로 수정이 필요합니다) ...
+    fn modulus_switch(&self, ct: &Ciphertext, params: &QfheParameters<'_, '_, '_>) -> Ciphertext {
         // 체인의 다음 모듈러스를 가져옵니다
         // 1. 현재 레벨과 다음 레벨의 모듈러스를 가져옴
         let current_level = ct.modulus_level;

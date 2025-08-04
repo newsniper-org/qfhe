@@ -1,110 +1,172 @@
-from typing import Literal, NamedTuple, TypeVar
+# devutils/gen_ntt_params.py
 
-import json
+import math
 
-class MinimalParameter(NamedTuple):
-    k: int
-    modulus_q: int
-    primitive_root: int
+# ==============================================================================
+# Helper Functions for Number Theory
+# ==============================================================================
 
-SecurityLevel = Literal[128, 160, 192, 224,256]
+def power(base, exp, mod):
+    """
+    Calculates (base^exp) % mod efficiently.
+    """
+    res = 1
+    base %= mod
+    while exp > 0:
+        if exp % 2 == 1:
+            res = (res * base) % mod
+        base = (base * base) % mod
+        exp //= 2
+    return res
 
-minimal_params: dict[SecurityLevel, MinimalParameter] = dict({
-    128: MinimalParameter(10, 1152921504606846883, 3),
-    160: MinimalParameter(10,1180591620717411303423,5),
-    192: MinimalParameter(10,1180591620717411303423,5),
-    224: MinimalParameter(11,340282366920938463463374607431768211293,7),
-    256: MinimalParameter(11,340282366920938463463374607431768211293,7)
-})
+def modInverse(n, mod):
+    """
+    Calculates the modular inverse of n under mod.
+    """
+    return power(n, mod - 2, mod)
 
-def gen_twiddle_lut(n: int, w_primitive: int, modulo: int):
-    for i in range(0,n):
-        yield pow(w_primitive,i,modulo)
+def find_primitive_root(p):
+    """
+    Finds a primitive root for a prime p.
+    Note: This is a simple implementation and might be slow for very large primes.
+    """
+    if p == 2:
+        return 1
+    phi = p - 1
+    
+    # Find prime factors of phi
+    factors = set()
+    d = 2
+    temp_phi = phi
+    while d * d <= temp_phi:
+        if temp_phi % d == 0:
+            factors.add(d)
+            while temp_phi % d == 0:
+                temp_phi //= d
+        d += 1
+    if temp_phi > 1:
+        factors.add(temp_phi)
 
-class NttParameters:
-    def __init__(self, modulus_q: int, w_primitive: int, w_inv_primitive: int, twiddle_lut_n1: list[int], twiddle_lut_n2: list[int], inv_twiddle_lut_n1: list[int], inv_twiddle_lut_n2: list[int]):
-        self.modulus_q: int = modulus_q
-        self.w_primitive: int = w_primitive
-        self.w_inv_primitive: int = w_inv_primitive
-        self.twiddle_lut_n1: list[int] = twiddle_lut_n1
-        self.twiddle_lut_n2: list[int] = twiddle_lut_n2
-        self.inv_twiddle_lut_n1: list[int] = inv_twiddle_lut_n1
-        self.inv_twiddle_lut_n2: list[int] = inv_twiddle_lut_n2
-        
+    # Check for primitive root
+    for res in range(2, p + 1):
+        is_primitive = True
+        for factor in factors:
+            if power(res, phi // factor, p) == 1:
+                is_primitive = False
+                break
+        if is_primitive:
+            return res
+    return -1
 
-
-def get_ntt_params(params: MinimalParameter):
-    k = params.k
-    q = params.modulus_q
-    n: int = pow(2,k)
-    root = params.primitive_root
-
-    w_primitive = pow(root,(q-1) // n,q)
-    w_inv_primitive = pow(w_primitive, q-2,q)
-
+def find_optimal_factors(n):
+    """
+    Finds n1, n2 such that n1 * n2 = n and n1, n2 are powers of two
+    and as close to sqrt(n) as possible.
+    """
+    if (n & (n - 1) != 0) or n == 0:
+        raise ValueError("N must be a power of two.")
+    k = n.bit_length() - 1
     k1 = k // 2
     k2 = k - k1
+    return 1 << k1, 1 << k2
 
-    n1: int = pow(2,k1)
-    n2: int = pow(2,k2)
+# ==============================================================================
+# Rust Code Generation
+# ==============================================================================
 
-    w_n2 = pow(w_primitive, n1, q)
-    twiddle_lut_n2 = list(gen_twiddle_lut(n2,w_n2,q))
+def format_rust_array(name, arr, type="u128"):
+    """
+    Formats a Python list into a Rust static array string.
+    """
+    content = f"pub const {name}: [{type}; {len(arr)}] = [\n"
+    for i, val in enumerate(arr):
+        content += f"    {val},"
+        if (i + 1) % 8 == 0:
+            content += "\n"
+    if not content.endswith("\n"):
+        content += "\n"
+    content += "];\n"
+    return content
 
-    w_n1 = pow(w_primitive, n2, q)
-    twiddle_lut_n1 = list(gen_twiddle_lut(n1,w_n1,q))
+def generate_ntt_tables_for_params(params):
+    """
+    Generates all necessary NTT tables for a given set of parameters.
+    """
+    N = params["N"]
+    Q_BASIS = params["Q_BASIS"]
+    
+    # In an RNS system, LUTs are needed for each prime in the basis.
+    # For simplicity, we generate them for the first prime, as in the Rust code.
+    q = Q_BASIS[0]
+    
+    n1, n2 = find_optimal_factors(N)
+    
+    root = find_primitive_root(q)
+    w_primitive = power(root, (q - 1) // N, q)
+    w_inv_primitive = modInverse(w_primitive, q)
 
-    w_inv_n2 = pow(w_inv_primitive, n1, q)
-    inv_twiddle_lut_n2 = list(gen_twiddle_lut(n2,w_inv_n2,q))
+    # Generate LUTs for n1
+    w_n1 = power(w_primitive, n2, q)
+    w_inv_n1 = power(w_inv_primitive, n2, q)
+    twiddle_lut_n1 = [power(w_n1, i, q) for i in range(n1)]
+    inv_twiddle_lut_n1 = [power(w_inv_n1, i, q) for i in range(n1)]
 
-    w_inv_n1 = pow(w_inv_primitive, n2, q)
-    inv_twiddle_lut_n1 = list(gen_twiddle_lut(n1,w_inv_n1,q))
+    # Generate LUTs for n2
+    w_n2 = power(w_primitive, n1, q)
+    w_inv_n2 = power(w_inv_primitive, n1, q)
+    twiddle_lut_n2 = [power(w_n2, i, q) for i in range(n2)]
+    inv_twiddle_lut_n2 = [power(w_inv_n2, i, q) for i in range(n2)]
 
-    return NttParameters(q, w_primitive,w_inv_primitive,twiddle_lut_n1,twiddle_lut_n2,inv_twiddle_lut_n1,inv_twiddle_lut_n2)
+    # Generate matrix twiddles
+    twiddle_matrix = [power(w_primitive, i * j, q) for i in range(n1) for j in range(n2)]
+    inv_twiddle_matrix = [power(w_inv_primitive, i * j, q) for i in range(n1) for j in range(n2)]
 
-T = TypeVar('T')
-def concat_lists(*lists: list[T]):
-    for ls in lists:
-        for item in ls:
-            yield item
+    # --- Generate Rust code string ---
+    code = f"// NTT Tables for N={N}, Q={q}\n"
+    code += format_rust_array(f"TWIDDLE_LUT_N1_{N}", twiddle_lut_n1)
+    code += format_rust_array(f"TWIDDLE_LUT_N2_{N}", twiddle_lut_n2)
+    code += format_rust_array(f"INV_TWIDDLE_LUT_N1_{N}", inv_twiddle_lut_n1)
+    code += format_rust_array(f"INV_TWIDDLE_LUT_N2_{N}", inv_twiddle_lut_n2)
+    code += format_rust_array(f"TWIDDLE_MATRIX_{N}", twiddle_matrix)
+    code += format_rust_array(f"INV_TWIDDLE_MATRIX_{N}", inv_twiddle_matrix)
+    
+    return code
 
-def get_log2_of_minimum_bits_count(n: int) -> int:
-    if n < 0:
-        raise ArithmeticError
-    i: int = 0
-    while n >= pow(2,pow(2,i)):
-        i = i + 1
-    else:
-        return i
+# ==============================================================================
+# Main Execution
+# ==============================================================================
 
+if __name__ == "__main__":
+    # Parameters mirroring src/core/rns.rs and src/core/mod.rs
+    PARAMS_1024 = {
+        "N": 1024,
+        "Q_BASIS": [1152921504606584833], # Q_128_BASIS
+    }
+    
+    PARAMS_2048 = {
+        "N": 2048,
+        "Q_BASIS": [9223372036854775783], # First element of Q_224_BASIS
+    }
 
+    # Generate the full Rust file content
+    rust_file_content = "// devutils/gen_ntt_params.py로 자동 생성된 파일입니다.\n"
+    rust_file_content += "// 수동으로 편집하지 마세요.\n\n"
+    rust_file_content += "#![allow(clippy::all)]\n\n"
+    
+    rust_file_content += "pub mod n1024 {\n"
+    rust_file_content += generate_ntt_tables_for_params(PARAMS_1024)
+    rust_file_content += "}\n\n"
 
-class NttParametersEncoder(json.JSONEncoder):
-    def default(self, obj):
-        if isinstance(obj, NttParameters):
-            bound_rem, bound_max = map(get_log2_of_minimum_bits_count,
-                (
-                    (obj.modulus_q - 1),
-                    max(set(concat_lists(obj.twiddle_lut_n1, obj.twiddle_lut_n2, obj.inv_twiddle_lut_n1, obj.inv_twiddle_lut_n2)))
-                )
-            )
-            
-            needed_max_bits: int = pow(2,min(bound_max, bound_rem))
+    rust_file_content += "pub mod n2048 {\n"
+    rust_file_content += generate_ntt_tables_for_params(PARAMS_2048)
+    rust_file_content += "}\n"
 
-            return {
-                "needed_max_bits": needed_max_bits,
-                "modulus_q": obj.modulus_q,
-                "w_primitive": obj.w_primitive,
-                "w_inv_primitive": obj.w_inv_primitive,
-                "twiddle_lut_n1": obj.twiddle_lut_n1,
-                "twiddle_lut_n2": obj.twiddle_lut_n2,
-                "inv_twiddle_lut_n1": obj.inv_twiddle_lut_n1,
-                "inv_twiddle_lut_n2": obj.inv_twiddle_lut_n2,
-            }
-        return super().default(obj)
+    # Write to file
+    output_path = "../src/core/ntt_tables.rs"
+    try:
+        with open(output_path, "w") as f:
+            f.write(rust_file_content)
+        print(f"Successfully generated NTT tables at: {output_path}")
+    except IOError as e:
+        print(f"Error writing to file {output_path}: {e}")
 
-if __name__ == '__main__':
-    ntt_params = { level: get_ntt_params(min_param) for level, min_param in minimal_params.items() }
-
-    with open("ntt_params.json","w") as f:
-        json.dump(ntt_params,f,indent=4,sort_keys=False,cls=NttParametersEncoder)

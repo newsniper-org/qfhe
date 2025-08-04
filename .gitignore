@@ -5,3 +5,5 @@ devutils/*
 !devutils/gen_ntt_params.py
 
 include/qfhe.h
+
+src/core/ntt_tables.rs
