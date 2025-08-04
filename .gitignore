@@ -3,3 +3,5 @@ main_demo_*
 
 devutils/*
 !devutils/gen_ntt_params.py
+
+include/qfhe.h
