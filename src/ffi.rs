@@ -1,21 +1,23 @@
 use crate::core::{
-    Ciphertext, QfheEngine, Polynomial, Quaternion, SecretKey, SecurityLevel, QfheParameters, RelinearizationKey,
-    KeySwitchingKey, BootstrapKey, 
+    Ciphertext, QfheEngine, Polynomial, Quaternion, SecretKey, SecurityLevel, QfheParameters,
+    RelinearizationKey, BootstrapKey, KeySwitchingKey, GgswCiphertext
 };
 use crate::hal::{CpuBackend, HardwareBackend};
 use rand::Rng;
 
+// QfheContext에 라이프타임 'a를 추가합니다.
 #[repr(C)]
-pub struct QfheContext {
-    backend: Box<dyn HardwareBackend>,
+pub struct QfheContext<'a> {
+    backend: Box<dyn HardwareBackend<'a> + 'a>,
     secret_key: SecretKey,
     relinearization_key: RelinearizationKey,
     bootstrap_key: BootstrapKey,
     keyswitching_key: KeySwitchingKey,
-    params: QfheParameters<'static>,
+    params: QfheParameters<'a>,
 }
 
-impl QfheEngine for QfheContext {
+// QfheEngine 트레이트 구현부에도 라이프타임을 명시합니다.
+impl<'a> QfheEngine<'a> for QfheContext<'a> {
     fn encrypt(&self, message: u64) -> Ciphertext {
         self.backend.encrypt(message, &self.params, &self.secret_key)
     }
@@ -41,25 +43,26 @@ impl QfheEngine for QfheContext {
     }
 
     fn modulus_switch(&self, ct: &Ciphertext) -> Ciphertext {
-        self.backend.modulus_switch(ct, &self.params)        
+        self.backend.modulus_switch(ct, &self.params)
     }
 }
 
+// [수정] 반환 타입에 'static 라이프타임을 명시하고, RNS 기반으로 비밀키를 생성합니다.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn qfhe_context_create(level: SecurityLevel) -> *mut QfheContext {
+pub unsafe extern "C" fn qfhe_context_create(level: SecurityLevel) -> *mut QfheContext<'static> {
     let params = level.get_params();
-    let mut rng = rand::rng();
+    let mut rng = rand::thread_rng();
+    let rns_basis_size = params.modulus_q.len();
     
-    // MLWE 비밀키는 k개의 다항식 벡터입니다.
     let secret_key_vec = (0..params.module_dimension_k).map(|_| {
         let coeffs = (0..params.polynomial_degree).map(|_| {
-            let val: i128 = rng.random_range(-1..=1);
-            Quaternion {
-                w: val.rem_euclid(params.modulus_q as i128) as u128,
-                x: val.rem_euclid(params.modulus_q as i128) as u128,
-                y: val.rem_euclid(params.modulus_q as i128) as u128,
-                z: val.rem_euclid(params.modulus_q as i128) as u128,
+            let val: i128 = rng.gen_range(-1..=1);
+            let mut w = Vec::with_capacity(rns_basis_size);
+            for &q_i in params.modulus_q {
+                w.push(val.rem_euclid(q_i as i128) as u64);
             }
+            // 쿼터니언의 다른 성분들도 동일하게 초기화 (또는 필요에 따라 다르게)
+            Quaternion { w, x: vec![0; rns_basis_size], y: vec![0; rns_basis_size], z: vec![0; rns_basis_size] }
         }).collect();
         Polynomial { coeffs }
     }).collect();
@@ -67,11 +70,9 @@ pub unsafe extern "C" fn qfhe_context_create(level: SecurityLevel) -> *mut QfheC
     let secret_key = SecretKey(secret_key_vec);
     
     let backend = Box::new(CpuBackend);
-    // 재선형화 키 생성
     let relinearization_key = backend.generate_relinearization_key(&secret_key, &params);
-
     let bootstrap_key = backend.generate_bootstrap_key(&secret_key, &params);
-    let keyswitching_key = backend.generate_keyswitching_key(&secret_key, &secret_key, &params); // 임시로 old=new
+    let keyswitching_key = backend.generate_keyswitching_key(&secret_key, &secret_key, &params);
     
     let context = Box::new(QfheContext { 
         backend,
@@ -132,13 +133,6 @@ pub unsafe extern "C" fn qfhe_homomorphic_sub(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn qfhe_ciphertext_destroy(ciphertext_ptr: *mut Ciphertext) {
-    if !ciphertext_ptr.is_null() {
-        drop(unsafe { Box::from_raw(ciphertext_ptr) });
-    }
-}
-
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn qfhe_homomorphic_mul(
     context_ptr: *mut QfheContext,
     ct1_ptr: *mut Ciphertext,
@@ -149,4 +143,11 @@ pub unsafe extern "C" fn qfhe_homomorphic_mul(
     let ct2 = unsafe { &*ct2_ptr };
     let result_ct = Box::new(context.homomorphic_mul(ct1, ct2));
     Box::into_raw(result_ct)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qfhe_ciphertext_destroy(ciphertext_ptr: *mut Ciphertext) {
+    if !ciphertext_ptr.is_null() {
+        drop(unsafe { Box::from_raw(ciphertext_ptr) });
+    }
 }

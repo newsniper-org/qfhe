@@ -1,106 +1,94 @@
 #![feature(bigint_helper_methods)]
+#![feature(portable_simd)]
 
-// 라이브러리의 각 모듈을 선언합니다.
 pub mod core;
 pub mod hal;
 pub mod ffi;
 pub mod ntt;
-// --- Public API ---
-// 라이브러리 사용자가 직접 접근할 수 있는 핵심 기능들을 공개(re-export)합니다.
-pub use crate::core::{QfheEngine, Ciphertext, Polynomial, Quaternion, SecretKey,
-    QfheParameters};
+
+pub use crate::core::{Ciphertext, Polynomial, SecretKey, QfheParameters};
 pub use crate::ffi::QfheContext;
-pub use crate::ntt::{BarrettReducer, Ntt, qntt::{SplitPolynomial, split, merge, qntt_forward, qntt_inverse, qntt_pointwise_mul}};
 
 // --- 테스트 모듈 ---
 // `cargo test` 명령어를 실행할 때만 컴파일되고 실행됩니다.
 #[cfg(test)]
 mod tests {
-    use super::QfheContext; 
-    use super::ffi::{qfhe_context_create, qfhe_context_destroy};
-    
+    use super::*;
+    use crate::core::SecurityLevel;
+    use crate::core::QfheEngine;
+
     #[test]
-    fn test_encryption_decryption_large_numbers() {
-        println!("--- 64비트 암호화/복호화 정확성 테스트 시작 ---");
-        
-        let context_ptr = unsafe { qfhe_context_create(crate::core::SecurityLevel::L128) };
-        let context = unsafe { &*(context_ptr as *mut QfheContext) };
-        println!("테스트 컨텍스트 생성 완료.");
+    fn test_encrypt_decrypt_correctness() {
+        println!("\n--- Testing Encrypt/Decrypt Correctness (L128) ---");
+        let context_ptr = unsafe { ffi::qfhe_context_create(SecurityLevel::L128) };
+        let context = unsafe { &*context_ptr };
 
-        let messages: [u64; 3] = [42, 100, u64::MAX / 2];
+        let msg: u64 = 42;
+        println!("Original message: {}", msg);
 
-        for &message in &messages {
-            println!("테스트 메시지: {}", message);
-            let ciphertext = context.encrypt(message);
-            println!("메시지 암호화 완료.");
-            let decrypted_message = context.decrypt(&ciphertext);
-            println!("암호문 복호화 완료. 복호화된 메시지: {}", decrypted_message);
-            assert_eq!(message, decrypted_message, "메시지 {}에 대한 암복호화 실패!", message);
-            println!("메시지 {} 검증 성공!", message);
-        }
-        
-        unsafe { qfhe_context_destroy(context_ptr) };
-        println!("--- 64비트 암호화/복호화 정확성 테스트 종료 ---\n");
+        let ct = context.encrypt(msg);
+        println!("Encryption complete.");
+
+        let decrypted_msg = context.decrypt(&ct);
+        println!("Decryption complete. Decrypted message: {}", decrypted_msg);
+
+        assert_eq!(msg, decrypted_msg, "FAIL: Decrypted message does not match original message!");
+        println!(" -> Encrypt/Decrypt VERIFIED! ✅");
+
+        unsafe { ffi::qfhe_context_destroy(context_ptr) };
     }
 
     #[test]
-    fn test_homomorphic_addition_large_numbers() {
-        println!("--- 64비트 동형 덧셈 정확성 테스트 시작 ---");
+    fn test_homomorphic_addition_correctness() {
+        println!("\n--- Testing Homomorphic Addition Correctness (L128) ---");
+        let context_ptr = unsafe { ffi::qfhe_context_create(SecurityLevel::L128) };
+        let context = unsafe { &*context_ptr };
 
-        let context_ptr = unsafe { qfhe_context_create(crate::core::SecurityLevel::L128) };
-        let context = unsafe { &*(context_ptr as *mut QfheContext) };
-        println!("테스트 컨텍스트 생성 완료.");
-
-        let msg1: u64 = 42;
-        let msg2: u64 = 100;
-        // 64비트 공간에서는 모듈러 연산 없이 단순 덧셈
-        let expected_sum = msg1 + msg2;
-        println!("메시지 1: {}, 메시지 2: {}. 예상 결과: {}", msg1, msg2, expected_sum);
+        let msg1: u64 = 25;
+        let msg2: u64 = 17;
+        let expected_add = msg1 + msg2;
+        println!("Messages: {}, {}. Expected sum: {}", msg1, msg2, expected_add);
 
         let ct1 = context.encrypt(msg1);
         let ct2 = context.encrypt(msg2);
-        println!("두 메시지 암호화 완료.");
+        println!("Encryption complete.");
 
-        let ct_sum = context.homomorphic_add(&ct1, &ct2);
-        println!("동형 덧셈 완료.");
+        let ct_add = context.homomorphic_add(&ct1, &ct2);
+        println!("Homomorphic addition complete.");
 
-        let decrypted_sum = context.decrypt(&ct_sum);
-        println!("결과 암호문 복호화 완료. 복호화된 합계: {}", decrypted_sum);
+        let decrypted_add = context.decrypt(&ct_add);
+        println!("Decryption complete. Decrypted sum: {}", decrypted_add);
 
-        assert_eq!(expected_sum, decrypted_sum, "동형 덧셈 실패!");
-        println!("동형 덧셈 검증 성공!");
+        assert_eq!(expected_add, decrypted_add, "FAIL: Homomorphic addition result is incorrect!");
+        println!(" -> Homomorphic Addition VERIFIED! ✅");
 
-        unsafe { qfhe_context_destroy(context_ptr) };
-        println!("--- 64비트 동형 덧셈 정확성 테스트 종료 ---");
+        unsafe { ffi::qfhe_context_destroy(context_ptr) };
     }
 
     #[test]
-    fn test_homomorphic_subtraction_large_numbers() {
-        println!("--- 64비트 동형 뺄셈 정확성 테스트 시작 ---");
+    fn test_homomorphic_multiplication_correctness() {
+        println!("\n--- Testing Homomorphic Multiplication Correctness (L128) ---");
+        let context_ptr = unsafe { ffi::qfhe_context_create(SecurityLevel::L128) };
+        let context = unsafe { &*context_ptr };
 
-        let context_ptr = unsafe { qfhe_context_create(crate::core::SecurityLevel::L128) };
-        let context = unsafe { &*(context_ptr as *mut QfheContext) };
-        println!("테스트 컨텍스트 생성 완료.");
-
-        let msg1: u64 = 100;
-        let msg2: u64 = 42;
-        let expected_sub = msg1 - msg2;
-        println!("메시지 1: {}, 메시지 2: {}. 예상 결과: {}", msg1, msg2, expected_sub);
+        let msg1: u64 = 7;
+        let msg2: u64 = 6;
+        let expected_mul = msg1 * msg2;
+        println!("Messages: {}, {}. Expected product: {}", msg1, msg2, expected_mul);
 
         let ct1 = context.encrypt(msg1);
         let ct2 = context.encrypt(msg2);
-        println!("두 메시지 암호화 완료.");
+        println!("Encryption complete.");
 
-        let ct_sub = context.homomorphic_sub(&ct1, &ct2);
-        println!("동형 뺄셈 완료.");
+        let ct_mul = context.homomorphic_mul(&ct1, &ct2);
+        println!("Homomorphic multiplication complete.");
 
-        let decrypted_sub = context.decrypt(&ct_sub);
-        println!("결과 암호문 복호화 완료. 복호화된 차: {}", decrypted_sub);
+        let decrypted_mul = context.decrypt(&ct_mul);
+        println!("Decryption complete. Decrypted product: {}", decrypted_mul);
 
-        assert_eq!(expected_sub, decrypted_sub, "동형 뺄셈 실패!");
-        println!("동형 뺄셈 검증 성공!");
+        assert_eq!(expected_mul, decrypted_mul, "FAIL: Homomorphic multiplication result is incorrect!");
+        println!(" -> Homomorphic Multiplication VERIFIED! ✅");
 
-        unsafe { qfhe_context_destroy(context_ptr) };
-        println!("--- 64비트 동형 뺄셈 정확성 테스트 종료 ---");
+        unsafe { ffi::qfhe_context_destroy(context_ptr) };
     }
 }

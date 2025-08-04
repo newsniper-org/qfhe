@@ -36,7 +36,7 @@ PYTHON3_EXECUTABLE := pypy
 all: build run
 
 src/core/ntt_tables.rs:
-    $(PYTHON3_EXECUTABLE) devutils/gen_ntt_params.py
+	$(PYTHON3_EXECUTABLE) devutils/gen_ntt_params.py
 
 # Build the Rust library and the C executable
 build: $(LIB_PATH)
