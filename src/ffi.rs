@@ -7,17 +7,17 @@ use rand::Rng;
 
 // QfheContext에 라이프타임 'a를 추가합니다.
 #[repr(C)]
-pub struct QfheContext<'a> {
-    backend: Box<dyn HardwareBackend<'a, 'a, 'a> + 'a>,
+pub struct QfheContext {
+    backend: Box<dyn HardwareBackend<'static, 'static, 'static> + 'static>,
     secret_key: SecretKey,
     relinearization_key: RelinearizationKey,
     bootstrap_key: BootstrapKey,
     keyswitching_key: KeySwitchingKey,
-    params: QfheParameters<'a, 'a, 'a>,
+    params: QfheParameters<'static, 'static, 'static>,
 }
 
 // QfheEngine 트레이트 구현부에도 라이프타임을 명시합니다.
-impl<'a> QfheEngine<'a> for QfheContext<'a> {
+impl QfheEngine for QfheContext {
     fn encrypt(&self, message: u64) -> Ciphertext {
         self.backend.encrypt(message, &self.params, &self.secret_key)
     }
@@ -49,7 +49,7 @@ impl<'a> QfheEngine<'a> for QfheContext<'a> {
 
 // [수정] 반환 타입에 'static 라이프타임을 명시하고, RNS 기반으로 비밀키를 생성합니다.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn qfhe_context_create(level: SecurityLevel) -> *mut QfheContext<'static> {
+pub unsafe extern "C" fn qfhe_context_create(level: SecurityLevel) -> *mut QfheContext {
     let params = level.get_params();
     let mut rng = rand::rng();
     let rns_basis_size = params.modulus_q.len();

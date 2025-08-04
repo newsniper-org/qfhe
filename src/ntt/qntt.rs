@@ -63,7 +63,6 @@ pub fn qntt_pointwise_mul(p1: &mut Polynomial, p2: &Polynomial, params: &QfhePar
     p1.coeffs.par_iter_mut().zip(p2.coeffs.par_iter()).for_each(|(p1_coeff, p2_coeff)| {
         for i in 0..rns_basis_size {
             let q = params.modulus_q[i];
-            let reducer = BarrettReducer64::new(q);
             
             // c1a, c2a, c1b, c2b (split)
             let c1a_w = p1_coeff.w[i];
@@ -80,22 +79,34 @@ pub fn qntt_pointwise_mul(p1: &mut Polynomial, p2: &Polynomial, params: &QfhePar
             let c1b_conj_x = q - c1b_x;
             let c2b_conj_x = q - c2b_x;
 
-            // c1_res = c1a*c1b - c2a*c2b_conj
-            let term1_w = reducer.reduce(concat64x2(c1a_w.widening_mul(c1b_w)) + (q as u128) - concat64x2(c1a_x.widening_mul(c1b_x)));
-            let term1_x = reducer.reduce(concat64x2(c1a_w.widening_mul(c1b_x)) + (concat64x2(c1a_x.widening_mul(c1b_w))));
-            // [버그 수정] c1b -> c2b_conj
-            let term2_w = reducer.reduce(concat64x2(c2a_w.widening_mul(c2b_w)) + (q as u128) - concat64x2(c2a_x.widening_mul(c2b_conj_x)));
-            let term2_x = reducer.reduce(concat64x2(c2a_w.widening_mul(c2b_conj_x)) + concat64x2(c2a_x.widening_mul(c2b_w)));
+            // --- c1_res = c1a*c1b - c2a*c2b_conj ---
+            // term1 = c1a * c1b
+            let t1_w_a = params.reducers[i].reduce(concat64x2(c1a_w.widening_mul(c1b_w)));
+            let t1_w_b = params.reducers[i].reduce(concat64x2(c1a_x.widening_mul(c1b_x)));
+            let term1_w = (t1_w_a + q - t1_w_b) % q;
+            let term1_x = params.reducers[i].reduce(concat64x2(c1a_w.widening_mul(c1b_x)) + concat64x2(c1a_x.widening_mul(c1b_w)));
+
+            // term2 = c2a * c2b_conj
+            let t2_w_a = params.reducers[i].reduce(concat64x2(c2a_w.widening_mul(c2b_w)));
+            let t2_w_b = params.reducers[i].reduce(concat64x2(c2a_x.widening_mul(c2b_conj_x)));
+            let term2_w = (t2_w_a + q - t2_w_b) % q;
+            let term2_x = params.reducers[i].reduce(concat64x2(c2a_w.widening_mul(c2b_conj_x)) + concat64x2(c2a_x.widening_mul(c2b_w)));
             
             let res_c1_w = term1_w.safe_sub_mod(term2_w, q);
             let res_c1_x = term1_x.safe_sub_mod(term2_x, q);
             
-            // c2_res = c1a*c2b + c2a*c1b_conj
-            let term3_w = reducer.reduce(concat64x2(c1a_w.widening_mul(c2b_w)) + (q as u128) - concat64x2(c1a_x.widening_mul(c2b_x)));
-            let term3_x = reducer.reduce(concat64x2(c1a_w.widening_mul(c2b_x)) + concat64x2(c1a_x.widening_mul(c2b_w)));
-            // [버그 수정] c1b -> c1b_conj
-            let term4_w = reducer.reduce(concat64x2(c2a_w.widening_mul(c1b_w)) + (q as u128) - concat64x2(c2a_x.widening_mul(c1b_conj_x)));
-            let term4_x = reducer.reduce(concat64x2(c2a_w.widening_mul(c1b_conj_x)) + concat64x2(c2a_x.widening_mul(c1b_w)));
+            // --- c2_res = c1a*c2b + c2a*c1b_conj ---
+            // term3 = c1a * c2b
+            let t3_w_a = params.reducers[i].reduce(concat64x2(c1a_w.widening_mul(c2b_w)));
+            let t3_w_b = params.reducers[i].reduce(concat64x2(c1a_x.widening_mul(c2b_x)));
+            let term3_w = (t3_w_a + q - t3_w_b) % q;
+            let term3_x = params.reducers[i].reduce(concat64x2(c1a_w.widening_mul(c2b_x)) + concat64x2(c1a_x.widening_mul(c2b_w)));
+            
+            // term4 = c2a * c1b_conj
+            let t4_w_a = params.reducers[i].reduce(concat64x2(c2a_w.widening_mul(c1b_w)));
+            let t4_w_b = params.reducers[i].reduce(concat64x2(c2a_x.widening_mul(c1b_conj_x)));
+            let term4_w = (t4_w_a + q - t4_w_b) % q;
+            let term4_x = params.reducers[i].reduce(concat64x2(c2a_w.widening_mul(c1b_conj_x)) + concat64x2(c2a_x.widening_mul(c1b_w)));
 
             let res_c2_w = term3_w.safe_add_mod(term4_w, q);
             let res_c2_x = term3_x.safe_add_mod(term4_x, q);

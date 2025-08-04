@@ -14,12 +14,13 @@ pub mod rns;
 pub use crate::core::rns::{
     Q_128_BASIS, Q_160_BASIS, Q_192_BASIS, Q_224_BASIS, Q_256_BASIS,
     MODULUS_CHAIN_128, MODULUS_CHAIN_160, MODULUS_CHAIN_192, MODULUS_CHAIN_224, MODULUS_CHAIN_256,
-    converter::{integer_to_rns, rns_to_integer}
+    converter::{integer_to_rns, rns_to_integer},
+    REDUCERS_128, REDUCERS_160, REDUCERS_192, REDUCERS_224, REDUCERS_256
 };
 
-pub mod ntt_tables;
+pub mod consts;
 
-pub use crate::core::ntt_tables::{n1024, n2048};
+pub use crate::core::consts::{n1024, n2048};
 
 pub mod num;
 pub use crate::core::num::{SafeModuloArith, concat64x2};
@@ -111,6 +112,7 @@ pub struct QfheParameters<'a, 'b, 'c> {
     pub gadget_base_b: u128,
     pub gadget_levels_l: usize,
     pub ntt_params: NttParameters<'c>,
+    pub reducers: &'b [BarrettReducer64]
 }
 
 #[derive(Debug, Clone)]
@@ -125,6 +127,7 @@ pub struct QfheMinimalParameters<'a, 'b, 'c> {
     pub gadget_base_b: u128,
     pub gadget_levels_l: usize,
     pub ntt_params: NttParameters<'c>,
+    pub reducers: &'b [BarrettReducer64]
 }
 
 impl<'a, 'b, 'c> QfheMinimalParameters<'a, 'b, 'c> {
@@ -142,6 +145,7 @@ impl<'a, 'b, 'c> QfheMinimalParameters<'a, 'b, 'c> {
             module_dimension_k: self.module_dimension_k,
             gadget_base_b: self.gadget_base_b,
             gadget_levels_l: self.gadget_levels_l,
+            reducers: self.reducers
         }
     }
     
@@ -165,7 +169,8 @@ impl SecurityLevel {
                 noise_std_dev: 3.2,
                 gadget_base_b: 1 << 8,
                 gadget_levels_l: 8, // 8 levels * 8 bits = 64 bits coverage
-                ntt_params: L128_NTT_PARAMS
+                ntt_params: L128_NTT_PARAMS,
+                reducers: &REDUCERS_128
             },
             // ~160-bit quantum security (Intermediate)
             SecurityLevel::L160 => QfheMinimalParameters {
@@ -178,7 +183,8 @@ impl SecurityLevel {
                 noise_std_dev: 3.2,
                 gadget_base_b: 1 << 8,
                 gadget_levels_l: 9, // 9 levels * 8 bits = 72 bits coverage
-                ntt_params: L160_NTT_PARAMS
+                ntt_params: L160_NTT_PARAMS,
+                reducers: &REDUCERS_160
             },
             // 192-bit quantum security (NIST Level 3)
             SecurityLevel::L192 => QfheMinimalParameters {
@@ -191,7 +197,8 @@ impl SecurityLevel {
                 noise_std_dev: 3.2,
                 gadget_base_b: 1 << 8,
                 gadget_levels_l: 9, // 9 levels * 8 bits = 72 bits coverage
-                ntt_params: L192_NTT_PARAMS
+                ntt_params: L192_NTT_PARAMS,
+                reducers: &REDUCERS_192
             },
             // ~224-bit quantum security (Intermediate)
             SecurityLevel::L224 => QfheMinimalParameters {
@@ -204,7 +211,8 @@ impl SecurityLevel {
                 noise_std_dev: 3.2,
                 gadget_base_b: 1 << 8,
                 gadget_levels_l: 16, // 16 levels * 8 bits = 128 bits coverage
-                ntt_params: L224_NTT_PARAMS
+                ntt_params: L224_NTT_PARAMS,
+                reducers: &REDUCERS_224
             },
             // 256-bit quantum security (NIST Level 5)
             SecurityLevel::L256 => QfheMinimalParameters {
@@ -217,7 +225,8 @@ impl SecurityLevel {
                 noise_std_dev: 3.2,
                 gadget_base_b: 1 << 8,
                 gadget_levels_l: 16, // 16 levels * 8 bits = 128 bits coverage
-                ntt_params: L256_NTT_PARAMS
+                ntt_params: L256_NTT_PARAMS,
+                reducers: &REDUCERS_256
             }
         };
         minimal.get_full_params()
@@ -242,7 +251,7 @@ pub struct GgswCiphertext {
 }
 
 /// 암호화, 복호화, 동형 연산을 위한 핵심 트레이트(trait)입니다.
-pub trait QfheEngine<'a> {
+pub trait QfheEngine {
     fn encrypt(&self, message: u64) -> Ciphertext;
     fn decrypt(&self, ciphertext: &Ciphertext) -> u64;
     fn homomorphic_add(&self, ct1: &Ciphertext, ct2: &Ciphertext) -> Ciphertext;

@@ -9,13 +9,14 @@ use crate::core::concat64x2;
 
 
 // [수정] u64 연산을 위한 BarrettReducer
+#[derive(Debug, Clone, Copy)]
 pub struct BarrettReducer64 {
     m: u64,
     m_inv: u128, // m_inv = floor(2^128 / m)
 }
 
 impl BarrettReducer64 {
-    pub fn new(m: u64) -> Self {
+    pub const fn new(m: u64) -> Self {
         Self {
             m,
             m_inv: Self::get_m_inv(m),
@@ -23,7 +24,7 @@ impl BarrettReducer64 {
     }
 
     #[inline(always)]
-    fn get_m_inv(m: u64) -> u128 {
+    const fn get_m_inv(m: u64) -> u128 {
         let max_u128 = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFu128;
         let (q, r) = (max_u128 / m as u128, max_u128 % m as u128);
         if (r+1) == (m as u128) {
@@ -187,37 +188,33 @@ impl<'a, 'b, 'c> Ntt<'a, 'b, 'c> for Polynomial {
             s.spawn(|_| {
                 soa_poly.w.par_iter_mut().enumerate().for_each(|(i, w_plane)| {
                     let q = params.modulus_q[i];
-                    let reducer = BarrettReducer64::new(q);
                     let root = primitive_root(q);
                     let w_primitive = power(root, (q - 1) / n as u64, q);
-                    ntt_cooley_tukey_radix4(w_plane, n, q, w_primitive, &reducer);
+                    ntt_cooley_tukey_radix4(w_plane, n, q, w_primitive, &params.reducers[i]);
                 });
             });
             s.spawn(|_| {
                 soa_poly.x.par_iter_mut().enumerate().for_each(|(i, x_plane)| {
                     let q = params.modulus_q[i];
-                    let reducer = BarrettReducer64::new(q);
                     let root = primitive_root(q);
                     let w_primitive = power(root, (q - 1) / n as u64, q);
-                    ntt_cooley_tukey_radix4(x_plane, n, q, w_primitive, &reducer);
+                    ntt_cooley_tukey_radix4(x_plane, n, q, w_primitive, &params.reducers[i]);
                 });
             });
             s.spawn(|_| {
                 soa_poly.y.par_iter_mut().enumerate().for_each(|(i, y_plane)| {
                     let q = params.modulus_q[i];
-                    let reducer = BarrettReducer64::new(q);
                     let root = primitive_root(q);
                     let w_primitive = power(root, (q - 1) / n as u64, q);
-                    ntt_cooley_tukey_radix4(y_plane, n, q, w_primitive, &reducer);
+                    ntt_cooley_tukey_radix4(y_plane, n, q, w_primitive, &params.reducers[i]);
                 });
             });
             s.spawn(|_| {
                 soa_poly.z.par_iter_mut().enumerate().for_each(|(i, z_plane)| {
                     let q = params.modulus_q[i];
-                    let reducer = BarrettReducer64::new(q);
                     let root = primitive_root(q);
                     let w_primitive = power(root, (q - 1) / n as u64, q);
-                    ntt_cooley_tukey_radix4(z_plane, n, q, w_primitive, &reducer);
+                    ntt_cooley_tukey_radix4(z_plane, n, q, w_primitive, &params.reducers[i]);
                 });
             });
         });

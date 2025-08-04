@@ -10,7 +10,6 @@ pub const Q_128_BASIS: [u64; 1] = [
 ];
 pub const MODULUS_CHAIN_128: [u128; 2] = [1125899906842597, 1099511627749];
 
-
 // --- L160 Security Levels ---
 // 전체 모듈러스 Q ~= 70 bits
 pub const Q_160_BASIS: [u64; 2] = [
@@ -54,5 +53,26 @@ pub const MODULUS_CHAIN_256: [u128; 2] = [
 ];
 
 
+pub const REDUCERS_128: [BarrettReducer64; 1] = [BarrettReducer64::new(1152921504606584833)];
+pub const REDUCERS_160: [BarrettReducer64; 2] = [
+    BarrettReducer64::new(9223372036854775783),
+    BarrettReducer64::new(13835058055282163713)
+];
+pub const REDUCERS_192: [BarrettReducer64; 2] = [
+    BarrettReducer64::new(9223372036854775783),
+    BarrettReducer64::new(13835058055282163713)
+];
+pub const REDUCERS_224: [BarrettReducer64; 2] = [
+    BarrettReducer64::new(9223372036854775783),
+    BarrettReducer64::new(18446744073709551557)
+];
+pub const REDUCERS_256: [BarrettReducer64; 2] = [
+    BarrettReducer64::new(9223372036854775783),
+    BarrettReducer64::new(18446744073709551557)
+];
+
+
 pub mod converter;
 pub use converter::{integer_to_rns, rns_to_integer};
+
+use crate::ntt::BarrettReducer64;

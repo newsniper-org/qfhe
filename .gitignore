@@ -7,3 +7,4 @@ devutils/*
 include/qfhe.h
 
 src/core/ntt_tables.rs
+src/core/consts/ntt_tables.rs

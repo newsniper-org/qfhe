@@ -162,7 +162,7 @@ if __name__ == "__main__":
     rust_file_content += "}\n"
 
     # Write to file
-    output_path = "src/core/ntt_tables.rs"
+    output_path = "src/core/consts/ntt_tables.rs"
     try:
         with open(output_path, "w") as f:
             f.write(rust_file_content)
