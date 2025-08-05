@@ -1,5 +1,7 @@
 // src/hal/cpu/mod.rs
 
+use std::simd::{Simd, u64x8, cmp::SimdPartialEq};
+
 use crate::core::num::concat64x2;
 use crate::core::{
     BootstrapKey, Ciphertext, GgswCiphertext, KeySwitchingKey, Polynomial, QfheParameters, Quaternion, RelinearizationKey, SecretKey, U256
@@ -13,6 +15,8 @@ use rand_distr::{Normal, Distribution};
 use crate::ntt::BarrettReducer64;
 use crate::ntt::qntt::*;
 
+
+use crate::core::consts::LANES;
 
 pub struct CpuBackend;
 
@@ -236,14 +240,61 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
         let n = params.polynomial_degree;
         let rns_basis_size = params.modulus_q.len();
         let mut res = Polynomial::zero(n, rns_basis_size);
+        
+        // SIMD 레인 수 (u64 타입 기준, AVX512는 8, AVX2는 4)
 
         for i in 0..n {
             for j in 0..rns_basis_size {
                 let q_j = params.modulus_q[j];
-                res.coeffs[i].w[j] = (p1.coeffs[i].w[j] + p2.coeffs[i].w[j]) % q_j;
-                res.coeffs[i].x[j] = (p1.coeffs[i].x[j] + p2.coeffs[i].x[j]) % q_j;
-                res.coeffs[i].y[j] = (p1.coeffs[i].y[j] + p2.coeffs[i].y[j]) % q_j;
-                res.coeffs[i].z[j] = (p1.coeffs[i].z[j] + p2.coeffs[i].z[j]) % q_j;
+                let q_simd: Simd<u64, LANES> = Simd::splat(q_j);
+
+                // --- .w 성분 SIMD 처리 ---
+                let w1_chunks = p1.coeffs[i].w.chunks_exact(LANES);
+                let w2_chunks = p2.coeffs[i].w.chunks_exact(LANES);
+                let res_w_chunks = res.coeffs[i].w.chunks_exact_mut(LANES);
+
+                for ((c1, c2), res_c) in w1_chunks.zip(w2_chunks).zip(res_w_chunks) {
+                    let simd1 = Simd::from_slice(c1);
+                    let simd2 = Simd::from_slice(c2);
+                    let sum = (simd1 + simd2) % q_simd;
+                    sum.copy_to_slice(res_c);
+                }
+
+                // --- .x 성분 SIMD 처리 ---
+                let x1_chunks = p1.coeffs[i].x.chunks_exact(LANES);
+                let x2_chunks = p2.coeffs[i].x.chunks_exact(LANES);
+                let res_x_chunks = res.coeffs[i].x.chunks_exact_mut(LANES);
+
+                for ((c1, c2), res_c) in x1_chunks.zip(x2_chunks).zip(res_x_chunks) {
+                    let simd1 = Simd::from_slice(c1);
+                    let simd2 = Simd::from_slice(c2);
+                    let sum = (simd1 + simd2) % q_simd;
+                    sum.copy_to_slice(res_c);
+                }
+
+                // --- .y 성분 SIMD 처리 ---
+                let y1_chunks = p1.coeffs[i].y.chunks_exact(LANES);
+                let y2_chunks = p2.coeffs[i].y.chunks_exact(LANES);
+                let res_y_chunks = res.coeffs[i].y.chunks_exact_mut(LANES);
+
+                for ((c1, c2), res_c) in y1_chunks.zip(y2_chunks).zip(res_y_chunks) {
+                    let simd1 = Simd::from_slice(c1);
+                    let simd2 = Simd::from_slice(c2);
+                    let sum = (simd1 + simd2) % q_simd;
+                    sum.copy_to_slice(res_c);
+                }
+
+                // --- .z 성분 SIMD 처리 ---
+                let z1_chunks = p1.coeffs[i].z.chunks_exact(LANES);
+                let z2_chunks = p2.coeffs[i].z.chunks_exact(LANES);
+                let res_z_chunks = res.coeffs[i].z.chunks_exact_mut(LANES);
+
+                for ((c1, c2), res_c) in z1_chunks.zip(z2_chunks).zip(res_z_chunks) {
+                    let simd1 = Simd::from_slice(c1);
+                    let simd2 = Simd::from_slice(c2);
+                    let sum = (simd1 + simd2) % q_simd;
+                    sum.copy_to_slice(res_c);
+                }
             }
         }
         res
@@ -258,10 +309,55 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
         for i in 0..n {
             for j in 0..rns_basis_size {
                 let q_j = params.modulus_q[j];
-                res.coeffs[i].w[j] = (p1.coeffs[i].w[j] + q_j - p2.coeffs[i].w[j]) % q_j;
-                res.coeffs[i].x[j] = (p1.coeffs[i].x[j] + q_j - p2.coeffs[i].x[j]) % q_j;
-                res.coeffs[i].y[j] = (p1.coeffs[i].y[j] + q_j - p2.coeffs[i].y[j]) % q_j;
-                res.coeffs[i].z[j] = (p1.coeffs[i].z[j] + q_j - p2.coeffs[i].z[j]) % q_j;
+                let q_simd: Simd<u64, LANES> = Simd::splat(q_j);
+                
+                // .w 성분 SIMD 처리
+                let w1_chunks = p1.coeffs[i].w.chunks_exact(LANES);
+                let w2_chunks = p2.coeffs[i].w.chunks_exact(LANES);
+                let res_w_chunks = res.coeffs[i].w.chunks_exact_mut(LANES);
+
+                for ((c1, c2), res_c) in w1_chunks.zip(w2_chunks).zip(res_w_chunks) {
+                    let simd1 = Simd::from_slice(c1);
+                    let simd2 = Simd::from_slice(c2);
+                    let sub = (simd1 + q_simd - simd2) % q_simd; // (a + q - b) % q
+                    sub.copy_to_slice(res_c);
+                }
+
+                // .x 성분 SIMD 처리
+                let x1_chunks = p1.coeffs[i].x.chunks_exact(LANES);
+                let x2_chunks = p2.coeffs[i].x.chunks_exact(LANES);
+                let res_x_chunks = res.coeffs[i].x.chunks_exact_mut(LANES);
+
+                for ((c1, c2), res_c) in x1_chunks.zip(x2_chunks).zip(res_x_chunks) {
+                    let simd1 = Simd::from_slice(c1);
+                    let simd2 = Simd::from_slice(c2);
+                    let sub = (simd1 + q_simd - simd2) % q_simd; // (a + q - b) % q
+                    sub.copy_to_slice(res_c);
+                }
+
+                // .y 성분 SIMD 처리
+                let y1_chunks = p1.coeffs[i].y.chunks_exact(LANES);
+                let y2_chunks = p2.coeffs[i].y.chunks_exact(LANES);
+                let res_y_chunks = res.coeffs[i].y.chunks_exact_mut(LANES);
+
+                for ((c1, c2), res_c) in y1_chunks.zip(y2_chunks).zip(res_y_chunks) {
+                    let simd1 = Simd::from_slice(c1);
+                    let simd2 = Simd::from_slice(c2);
+                    let sub = (simd1 + q_simd - simd2) % q_simd; // (a + q - b) % q
+                    sub.copy_to_slice(res_c);
+                }
+
+                // .z 성분 SIMD 처리
+                let z1_chunks = p1.coeffs[i].z.chunks_exact(LANES);
+                let z2_chunks = p2.coeffs[i].z.chunks_exact(LANES);
+                let res_z_chunks = res.coeffs[i].z.chunks_exact_mut(LANES);
+
+                for ((c1, c2), res_c) in z1_chunks.zip(z2_chunks).zip(res_z_chunks) {
+                    let simd1 = Simd::from_slice(c1);
+                    let simd2 = Simd::from_slice(c2);
+                    let sub = (simd1 + q_simd - simd2) % q_simd; // (a + q - b) % q
+                    sub.copy_to_slice(res_c);
+                }
             }
         }
         res

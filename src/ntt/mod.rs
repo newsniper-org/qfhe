@@ -1,11 +1,19 @@
 // newsniper-org/qfhe/qfhe-wip-cpu-simple/src/ntt/mod.rs
 
 use crate::core::{Polynomial, Quaternion, QfheParameters, SafeModuloArith};
-use crate::core::wide_arith::WideningArith;
+
+use crate::core::wide_arith::{WideningSimdMul, OverflowingSimdAdd, OverflowingSimdSub};
 use rayon::prelude::*;
 
 pub mod qntt;
 use crate::core::concat64x2;
+
+pub(crate) mod simd_utils;
+pub(crate) use crate::ntt::simd_utils::reduce_simd;
+
+use crate::core::consts::LANES;
+
+use std::simd::{Simd, u64x8, cmp::*};
 
 
 // [수정] u64 연산을 위한 BarrettReducer
@@ -72,62 +80,107 @@ pub(crate) fn primitive_root(p: u64) -> u64 {
     }
 }
 
-// ntt_cooley_tukey_radix4 함수가 u64 슬라이스를 처리합니다.
+/// Radix-4 Cooley-Tukey NTT 알고리즘 [SIMD 최적화]
 fn ntt_cooley_tukey_radix4(data: &mut [u64], n: usize, q: u64, w_primitive: u64, reducer: &BarrettReducer64) {
+    
+    // 1. Bit-reversal (순서 재배치)
     let log4_n = n.trailing_zeros() / 2;
     for i in 0..n {
-        let mut j = 0;
-        let mut t = i;
-        for _ in 0..log4_n {
-            j = (j << 2) | (t & 3);
-            t >>= 2;
-        }
-        if i < j {
-            data.swap(i, j);
-        }
+        let mut j = 0; let mut t = i;
+        for _ in 0..log4_n { j = (j << 2) | (t & 3); t >>= 2; }
+        if i < j { data.swap(i, j); }
     }
 
     let im_factor = power(w_primitive, (n / 4) as u64, q);
+    let q_simd = u64x8::splat(q);
+    let im_factor_simd = u64x8::splat(im_factor);
 
+    // 2. 버터플라이 연산
     let mut len = 4;
     while len <= n {
         let w_len = power(w_primitive, (n / len) as u64, q);
-        // [버그 수정] par_chunks_mut을 순차적인 for 루프로 변경하여 중첩 병렬화 제거
-        for i in (0..n).step_by(len) {
-            let chunk = &mut data[i..i+len];
+        
+        data.par_chunks_mut(len).for_each(|chunk| {
             let mut w1: u64 = 1;
-            for j in 0..(len / 4) {
-                let w2 = reducer.reduce(concat64x2(w1.widening_mul(w1)));
-                let w3 = reducer.reduce(concat64x2(w1.widening_mul(w2)));
+            let group_size = len / 4;
 
-                let idx0 = j;
-                let idx1 = idx0 + len / 4;
-                let idx2 = idx1 + len / 4;
-                let idx3 = idx2 + len / 4;
+            // --- SIMD 메인 루프 ---
+            let main_loop_len = group_size - (group_size % LANES);
+            for j in (0..main_loop_len).step_by(LANES) {
+                // 8개의 트위들 팩터(w1, w2, w3)를 미리 계산
+                let mut w1_arr = [0u64; LANES];
+                let mut w2_arr = [0u64; LANES];
+                let mut w3_arr = [0u64; LANES];
+                let mut current_w1 = w1;
+                for i in 0..LANES {
+                    let w2 = reducer.reduce(current_w1 as u128 * current_w1 as u128);
+                    w1_arr[i] = current_w1;
+                    w2_arr[i] = w2;
+                    w3_arr[i] = reducer.reduce(current_w1 as u128 * w2 as u128);
+                    current_w1 = reducer.reduce(current_w1 as u128 * w_len as u128);
+                }
+                
+                let w1_simd = u64x8::from_array(w1_arr);
+                let w2_simd = u64x8::from_array(w2_arr);
+                let w3_simd = u64x8::from_array(w3_arr);
+
+                // 8개의 계수 그룹을 SIMD 벡터로 로드
+                let u0 = u64x8::from_slice(&chunk[j..j + LANES]);
+                let u1 = u64x8::from_slice(&chunk[j + group_size..j + group_size + LANES]);
+                let u2 = u64x8::from_slice(&chunk[j + 2 * group_size..j + 2 * group_size + LANES]);
+                let u3 = u64x8::from_slice(&chunk[j + 3 * group_size..j + 3 * group_size + LANES]);
+                
+                // 트위들 팩터 곱셈
+                let u1_mul = reduce_simd(u1.widening_mul(w1_simd), reducer);
+                let u2_mul = reduce_simd(u2.widening_mul(w2_simd), reducer);
+                let u3_mul = reduce_simd(u3.widening_mul(w3_simd), reducer);
+
+                // 버터플라이 연산
+                let t0 = (u0 + u2_mul).overflowing_add(q_simd).0 % q_simd;
+                let t1 = (u1_mul + u3_mul).overflowing_add(q_simd).0 % q_simd;
+                let t2 = (u0 + q_simd - u2_mul).overflowing_add(q_simd).0 % q_simd;
+                let t3 = (u1_mul + q_simd - u3_mul).overflowing_add(q_simd).0 % q_simd;
+
+                let t3_times_im = reduce_simd(t3.widening_mul(im_factor_simd), reducer);
+                
+                // 결과 계산 및 저장
+                chunk[j..j + LANES].copy_from_slice(&((t0 + t1) % q_simd).to_array());
+                chunk[j + group_size..j + group_size + LANES].copy_from_slice(&((t2 + q_simd - t3_times_im) % q_simd).to_array());
+                chunk[j + 2 * group_size..j + 2 * group_size + LANES].copy_from_slice(&((t0 + q_simd - t1) % q_simd).to_array());
+                chunk[j + 3 * group_size..j + 3 * group_size + LANES].copy_from_slice(&((t2 + t3_times_im) % q_simd).to_array());
+
+                w1 = current_w1;
+            }
+
+            // --- 스칼라 나머지 루프 ---
+            for j in main_loop_len..group_size {
+                let w2 = reducer.reduce(w1 as u128 * w1 as u128);
+                let w3 = reducer.reduce(w1 as u128 * w2 as u128);
+                
+                let idx0 = j; let idx1 = idx0 + group_size;
+                let idx2 = idx1 + group_size; let idx3 = idx2 + group_size;
 
                 let u0 = chunk[idx0];
-                let u1 = reducer.reduce(concat64x2(chunk[idx1].widening_mul(w1)));
-                let u2 = reducer.reduce(concat64x2(chunk[idx2].widening_mul(w2)));
-                let u3 = reducer.reduce(concat64x2(chunk[idx3].widening_mul(w3)));
+                let u1_mul = reducer.reduce(chunk[idx1] as u128 * w1 as u128);
+                let u2_mul = reducer.reduce(chunk[idx2] as u128 * w2 as u128);
+                let u3_mul = reducer.reduce(chunk[idx3] as u128 * w3 as u128);
 
-                let t0 = (u0 + u2) % q;
-                let t1 = (u1 + u3) % q;
-                let t2 = (u0 + q - u2) % q;
-                let t3 = (u1 + q - u3) % q;
-                
-                let t3_times_im = reducer.reduce(concat64x2(t3.widening_mul(im_factor)));
+                let t0 = (u0 + u2_mul) % q; let t1 = (u1_mul + u3_mul) % q;
+                let t2 = (u0 + q - u2_mul) % q; let t3 = (u1_mul + q - u3_mul) % q;
+                let t3_times_im = reducer.reduce(t3 as u128 * im_factor as u128);
 
                 chunk[idx0] = (t0 + t1) % q;
                 chunk[idx1] = (t2 + q - t3_times_im) % q;
                 chunk[idx2] = (t0 + q - t1) % q;
                 chunk[idx3] = (t2 + t3_times_im) % q;
 
-                w1 = reducer.reduce(concat64x2(w1.widening_mul(w_len)));
+                w1 = reducer.reduce(w1 as u128 * w_len as u128);
             }
-        }
+        });
         len *= 4;
     }
 }
+
 
 // --- AoS <-> SoA 변환을 위한 구조체 및 함수 ---
 // 이 부분은 RNS NTT 구현 방식 변경으로 인해 qntt.rs로 이동하거나 재설계될 수 있습니다.

@@ -29,7 +29,7 @@ pub(crate) mod u256;
 pub(crate) use crate::core::u256::U256;
 
 pub(crate) mod wide_arith;
-pub(crate) use crate::core::wide_arith::WideningArith;
+pub(crate) use crate::core::wide_arith::{WideningAdd, WideningSimdMul, OverflowingSimdAdd, OverflowingSimdSub};
 
 /// C FFI에서 사용할 보안 수준 열거형입니다.
 #[repr(C)]
