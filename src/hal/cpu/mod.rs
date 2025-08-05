@@ -2,7 +2,7 @@
 
 use crate::core::num::concat64x2;
 use crate::core::{
-    BootstrapKey, Ciphertext, GgswCiphertext, KeySwitchingKey, Polynomial, QfheParameters, Quaternion, RelinearizationKey, SecretKey, U256
+    BootstrapKey, Ciphertext, GgswCiphertext, KeySwitchingKey, Polynomial, PublicKey, QfheParameters, Quaternion, RelinearizationKey, SecretKey, U256
 };
 use crate::core::rns::*;
 use crate::ntt::power;
@@ -188,20 +188,64 @@ fn cmux(ggsw_gate: &GgswCiphertext, ct0: &Ciphertext, ct1: &Ciphertext, params: 
 
 
 impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
-    /// 메시지를 암호화합니다. [RNS 기반]
-    fn encrypt(&self, message: u64, params: &QfheParameters<'a, 'b, 'c>, secret_key: &SecretKey) -> Ciphertext {
+    fn generate_public_key(&self, secret_key: &SecretKey, params: &QfheParameters<'a, 'c>) -> PublicKey {
+        let k = params.module_dimension_k;
         let n = params.polynomial_degree;
+        let rns_basis_size = params.modulus_q.len();
+
+        // a: 무작위 다항식 벡터 생성
+        let a = (0..k).map(|_| {
+            Polynomial::random(n, rns_basis_size, params) // 균등 분포에서 샘플링하는 헬퍼 함수
+        }).collect::<Vec<_>>();
+
+        // e: 작은 오차 다항식 생성
+        let e = Polynomial::small_random(n, rns_basis_size, params.noise_std_dev); // 정규 분포 샘플링 헬퍼
+
+        // b = -a*s + e
+        let mut b = e;
+        for i in 0..k {
+            let mut a_s = a[i].clone();
+            self.polynomial_mul_assign(&mut a_s, &secret_key.0[i], params);
+            self.polynomial_sub_assign(&mut b, &a_s, params);
+        }
+
+        PublicKey { b, a }
+    }
+
+
+    /// 메시지를 암호화합니다. [RNS 기반]
+    fn encrypt(&self, message: u64, params: &QfheParameters<'a, 'b, 'c>, public_key: PublicKey) -> Ciphertext {
+        let k = params.module_dimension_k;
+        let n = params.polynomial_degree;
+        let rns_basis_size = params.modulus_q.len();
         
-        // m: 메시지를 스케일링하고 다항식으로 인코딩 (RNS 형태)
-        let mut scaled_m_poly = Polynomial::zero(n, params.modulus_q.len());
-        let plaintext_mask = (1u128 << params.plaintext_modulus) - 1;
-        let scaled_message = ((message as u128) & plaintext_mask) * params.scaling_factor_delta;
+        // 작은 다항식 u, e0, e1, ... ek 샘플링
+        let u = Polynomial::small_random(n, rns_basis_size, params.noise_std_dev);
+        let e0 = Polynomial::small_random(n, rns_basis_size, params.noise_std_dev);
+        let e_vec = (0..k).map(|_| {
+            Polynomial::small_random(n, rns_basis_size, params.noise_std_dev)
+        }).collect::<Vec<_>>();
+
+        // c0 = u*b + e0 + m*delta
+        let mut c0 = u.clone();
+        self.polynomial_mul_assign(&mut c0, &public_key.b, params);
+        self.polynomial_add_assign(&mut c0, &e0, params);
         
-        // 메시지를 다항식의 상수항에 인코딩합니다.
-        scaled_m_poly.coeffs[0].w = integer_to_rns(scaled_message, params.modulus_q);
-        
-        // 내부 암호화 함수를 호출합니다.
-        encrypt_poly(&scaled_m_poly, params, secret_key)
+        let mut msg_poly = Polynomial::zero(n, rns_basis_size);
+        let scaled_msg = (message as u128) * params.scaling_factor_delta;
+        msg_poly.coeffs[0].w = integer_to_rns(scaled_msg, params.modulus_q);
+        self.polynomial_add_assign(&mut c0, &msg_poly, params);
+
+        // c1_i = u*a_i + e_i
+        let mut c1 = Vec::with_capacity(k);
+        for i in 0..k {
+            let mut u_a = u.clone();
+            self.polynomial_mul_assign(&mut u_a, &public_key.a[i], params);
+            self.polynomial_add_assign(&mut u_a, &e_vec[i], params);
+            c1.push(u_a);
+        }
+
+        Ciphertext { a_vec: c1, b: c0, modulus_level: 0 }
     }
 
     /// 암호문을 복호화합니다. [RNS 기반]
@@ -318,7 +362,6 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
                 
                 // 각 가젯 레벨에 대해 (g^l * s_i * s_j)를 암호화
                 for l in 0..levels {
-                    let mut p = Polynomial::zero(n, rns_basis_size);
                     let power_of_base = params.gadget_base_b.pow(l as u32);
                     let power_of_base_rns = integer_to_rns(power_of_base, params.modulus_q);
                     

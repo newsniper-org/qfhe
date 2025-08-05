@@ -5,7 +5,7 @@ pub mod polynomial;
 pub use crate::core::polynomial::Polynomial;
 
 pub mod keys;
-pub use crate::core::keys::{SecretKey, RelinearizationKey, KeySwitchingKey, BootstrapKey};
+pub use crate::core::keys::{SecretKey, RelinearizationKey, KeySwitchingKey, BootstrapKey, PublicKey};
 
 use crate::ntt::{power, primitive_root, BarrettReducer64};
 
@@ -30,6 +30,8 @@ pub(crate) use crate::core::u256::U256;
 
 pub(crate) mod wide_arith;
 pub(crate) use crate::core::wide_arith::WideningArith;
+
+use serde::{Serialize, Deserialize};
 
 /// C FFI에서 사용할 보안 수준 열거형입니다.
 #[repr(C)]

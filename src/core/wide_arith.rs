@@ -1,5 +1,3 @@
-//! Widening arithmetic operations for SIMD emulation.
-
 /// A trait for widening arithmetic operations.
 pub trait WideningArith {
     /// The wider type that can hold the result of the operation.

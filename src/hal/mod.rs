@@ -1,9 +1,9 @@
 // src/hal/mod.rs
 
-use crate::core::{Ciphertext, Polynomial, SecretKey, QfheParameters, RelinearizationKey, KeySwitchingKey, BootstrapKey, };
+use crate::core::{Ciphertext, Polynomial, SecretKey, QfheParameters, RelinearizationKey, KeySwitchingKey, BootstrapKey, PublicKey };
 
 pub trait HardwareBackend<'a, 'b, 'c> {
-    fn encrypt(&self, message: u64, params: &QfheParameters<'a, 'b, 'c>, secret_key: &SecretKey) -> Ciphertext;
+    fn encrypt(&self, message: u64, params: &QfheParameters<'a, 'b, 'c>, public_key: &PublicKey) -> Ciphertext;
     fn decrypt(&self, ciphertext: &Ciphertext, params: &QfheParameters<'a, 'b, 'c>, secret_key: &SecretKey) -> u64;
     fn homomorphic_add(&self, ct1: &Ciphertext, ct2: &Ciphertext, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext;
     fn homomorphic_sub(&self, ct1: &Ciphertext, ct2: &Ciphertext, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext;
@@ -20,6 +20,8 @@ pub trait HardwareBackend<'a, 'b, 'c> {
     fn keyswitch(&self, ct: &Ciphertext, ksk: &KeySwitchingKey, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext;
 
     fn modulus_switch(&self, ct: &Ciphertext, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext;
+
+    fn generate_public_key(&self, secret_key: &SecretKey, params: &QfheParameters<'a, 'c>) -> PublicKey;
 }
 
 pub mod cpu;

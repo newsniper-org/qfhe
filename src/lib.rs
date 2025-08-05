@@ -1,5 +1,4 @@
 #![feature(bigint_helper_methods)]
-#![feature(portable_simd)]
 
 pub mod core;
 pub mod hal;
@@ -8,6 +7,9 @@ pub mod ntt;
 
 pub use crate::core::{Ciphertext, Polynomial, SecretKey, QfheParameters};
 pub use crate::ffi::QfheContext;
+
+pub mod serialization;
+pub use serialization::{CipherObject, KeyObject, Key, KeyType};
 
 // --- 테스트 모듈 ---
 // `cargo test` 명령어를 실행할 때만 컴파일되고 실행됩니다.

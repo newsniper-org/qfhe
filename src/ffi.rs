@@ -5,6 +5,8 @@ use crate::core::{
 use crate::hal::{CpuBackend, HardwareBackend};
 use rand::Rng;
 
+use serde_json::{Serializer, Deserializer};
+
 // QfheContext에 라이프타임 'a를 추가합니다.
 #[repr(C)]
 pub struct QfheContext {
@@ -93,10 +95,30 @@ pub unsafe extern "C" fn qfhe_context_destroy(context_ptr: *mut QfheContext) {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn qfhe_encrypt(context_ptr: *mut QfheContext, message: u64) -> *mut Ciphertext {
-    let context = unsafe { &*context_ptr };
-    let ciphertext = Box::new(context.encrypt(message));
+pub unsafe extern "C" fn qfhe_context_generate_public_key(context: *const QfheContext) -> *mut PublicKey {
+    let ctx = unsafe { &*context };
+    let pk = ctx.backend.generate_public_key(&ctx.secret_key, &ctx.params);
+    Box::into_raw(Box::new(pk))
+}
+
+// 공개키를 받아 암호화하는 FFI 함수
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qfhe_encrypt(
+    context: *const QfheContext,
+    message: u64,
+    public_key: *const PublicKey,
+) -> *mut Ciphertext {
+    let ctx = unsafe { &*context };
+    let pk = unsafe { &*public_key };
+    let ciphertext = Box::new(ctx.backend.encrypt(message, pk, &ctx.params));
     Box::into_raw(ciphertext)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn qfhe_public_key_destroy(pk_ptr: *mut PublicKey) {
+    if !pk_ptr.is_null() {
+        drop(unsafe { Box::from_raw(pk_ptr) });
+    }
 }
 
 #[unsafe(no_mangle)]

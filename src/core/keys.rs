@@ -21,3 +21,12 @@ pub struct KeySwitchingKey {
 pub struct BootstrapKey {
     pub ggsw_vector: Vec<GgswCiphertext>,
 }
+
+
+
+/// 공개키 구조체. (b, a) 쌍으로 구성됩니다.
+#[derive(Clone, Debug)]
+pub struct PublicKey {
+    pub b: Polynomial,
+    pub a: Vec<Polynomial>, // 기존 a_vec과 동일한 역할
+}
