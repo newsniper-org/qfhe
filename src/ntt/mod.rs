@@ -110,10 +110,11 @@ fn ntt_cooley_tukey_radix4(data: &mut [u64], n: usize, q: u64, w_primitive: u64,
                 let u2 = reducer.reduce(concat64x2(chunk[idx2].widening_mul(w2)));
                 let u3 = reducer.reduce(concat64x2(chunk[idx3].widening_mul(w3)));
 
-                let t0 = (u0 + u2) % q;
-                let t1 = (u1 + u3) % q;
-                let t2 = (u0 + q - u2) % q;
-                let t3 = (u1 + q - u3) % q;
+                // --- ❗❗❗ 버그 수정: 안전한 모듈러 연산으로 변경 ❗❗❗ ---
+                let t0 = u0.safe_add_mod(u2, q);
+                let t1 = u1.safe_add_mod(u3, q);
+                let t2 = u0.safe_sub_mod(u2, q);
+                let t3 = u1.safe_sub_mod(u3, q);
                 
                 let t3_times_im = reducer.reduce(concat64x2(t3.widening_mul(im_factor)));
 
@@ -122,7 +123,7 @@ fn ntt_cooley_tukey_radix4(data: &mut [u64], n: usize, q: u64, w_primitive: u64,
                 chunk[idx2] = (t0 + q - t1) % q;
                 chunk[idx3] = (t2 + t3_times_im) % q;
 
-                w1 = reducer.reduce(concat64x2(w1.widening_mul(w_len)));
+                w1 = w1.safe_mul_mod(w_len, q);
             }
         }
         len *= 4;

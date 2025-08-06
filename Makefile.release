@@ -55,7 +55,7 @@ $(LIB_PATH): src/lib.rs src/core/mod.rs src/hal/mod.rs src/ffi.rs Cargo.toml bui
 # Run the C executable
 run-01:
 	@echo "\n--- Running Demo ---"
-	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/01_generate_keys ./bin/01_generate_keys
+	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/01_generate_keys ./bin/01_generate_key_s
 	@echo "--- End of Demo ---"
 
 run-02:

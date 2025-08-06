@@ -510,7 +510,7 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
     }
 
     /// 키 스위칭 키를 생성합니다.
-    fn generate_keyswitching_key(&self, old_sk: &SecretKey, new_sk: &SecretKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>) -> KeySwitchingKey {
+    fn generate_key_switching_key(&self, old_sk: &SecretKey, new_sk: &SecretKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>) -> KeySwitchingKey {
         let k = params.module_dimension_k;
         let l = params.gadget_levels_l;
         let mut key_levels = Vec::with_capacity(k);
@@ -534,7 +534,7 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
     fn generate_bootstrap_key(&self, sk: &SecretKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>) -> BootstrapKey {
         let n = params.polynomial_degree;
         let l = params.gadget_levels_l;
-        let mut bsk_ggsw_vector = Vec::with_capacity(n);
+        let mut bk_ggsw_vector = Vec::with_capacity(n);
 
         // LWE 비밀키는 RLWE 비밀키의 첫 번째 다항식(s_0)의 계수들로 간주
         let lwe_sk_poly = &sk.0[0];
@@ -554,13 +554,13 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
                 // LWE 비밀키의 각 계수를 GGSW 형태로 암호화
                 ggsw_levels.push(encrypt_internal(&p, sk, rng, params));
             }
-            bsk_ggsw_vector.push(GgswCiphertext { levels: ggsw_levels });
+            bk_ggsw_vector.push(GgswCiphertext { levels: ggsw_levels });
         }
-        BootstrapKey { ggsw_vector: bsk_ggsw_vector }
+        BootstrapKey { ggsw_vector: bk_ggsw_vector }
     }
     
     /// 프로그래머블 부트스트래핑을 수행합니다. [구현 완료]
-    fn bootstrap(&self, ct: &Ciphertext, test_poly: &Polynomial, bsk: &BootstrapKey, ksk: &KeySwitchingKey, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext {
+    fn bootstrap(&self, ct: &Ciphertext, test_poly: &Polynomial, bk: &BootstrapKey, ksk: &KeySwitchingKey, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext {
         let n = params.polynomial_degree;
         let k = params.module_dimension_k;
         let rns_basis_size = params.modulus_q.len();
@@ -573,7 +573,7 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
         // b - <a,s> 계산 후 모듈러스 변환
         let mut as_poly = Polynomial::zero(n, rns_basis_size);
         for i in 0..k {
-            as_poly = self.polynomial_add(&as_poly, &self.polynomial_mul(&ct.a_vec[i], &SecretKey(vec![bsk.ggsw_vector[i].levels[0].b.clone()]).0[0], params), params);
+            as_poly = self.polynomial_add(&as_poly, &self.polynomial_mul(&ct.a_vec[i], &SecretKey(vec![bk.ggsw_vector[i].levels[0].b.clone()]).0[0], params), params);
         }
         let phase = self.polynomial_sub(&ct.b, &as_poly, params);
 
@@ -600,7 +600,7 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
 
         // ACC = ACC * ∏ CMUX(a_bar_i, 1, X^{-2^i})
         for i in 0..n {
-            let control_bit_ggsw = &bsk.ggsw_vector[i]; // GGSW(s_i)
+            let control_bit_ggsw = &bk.ggsw_vector[i]; // GGSW(s_i)
             
             // X^{-2^i} 계산 (회전 다항식)
             let mut rot_poly = Polynomial::zero(n, rns_basis_size);

@@ -69,8 +69,21 @@ impl<'de> Deserialize<'de> for SecurityLevel {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct KeyObject<K : Key> {
-    pub security_level: SecurityLevel,
-    pub payload: K
+    security_level: SecurityLevel,
+    payload: K
+}
+
+impl<'de, K: Key + Serialize + Deserialize<'de> + Clone> KeyObject<K> {
+    pub fn new(payload: K, security_level: SecurityLevel) -> Self {
+        Self {
+            security_level,
+            payload: payload.clone()
+        }
+    }
+
+    pub fn clone_payload(&self) -> K {
+        self.payload.clone()
+    }
 }
 
 

@@ -6,7 +6,7 @@ pub mod ffi;
 pub mod ntt;
 
 pub use crate::core::{Ciphertext, Polynomial, SecretKey, QfheParameters, SecurityLevel};
-pub use crate::ffi::QfheContext;
+pub use crate::ffi::{EvaluationContext, EncryptionContext, DecryptionContext};
 
 pub mod serialization;
 pub use serialization::{CipherObject, KeyObject, Key, KeyType};
@@ -18,7 +18,7 @@ use rand_chacha::ChaCha20Rng;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{keys::generate_keys, MasterKey, Salt, SecurityLevel};
+    use crate::core::{keys::generate_key_s, MasterKey, Salt, SecurityLevel};
     use crate::ffi::setup_context;
     use crate::hal::CpuBackend;
     use crate::core::QfheEngine;

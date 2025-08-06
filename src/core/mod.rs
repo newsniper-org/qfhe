@@ -5,7 +5,7 @@ pub mod polynomial;
 pub use crate::core::polynomial::Polynomial;
 
 pub mod keys;
-pub use crate::core::keys::{SecretKey, RelinearizationKey, KeySwitchingKey, BootstrapKey, PublicKey, MasterKey, Salt, generate_keys};
+pub use crate::core::keys::{SecretKey, RelinearizationKey, KeySwitchingKey, BootstrapKey, PublicKey, MasterKey, Salt, generate_key_s};
 
 use crate::ntt::{power, primitive_root, BarrettReducer64};
 
@@ -278,9 +278,16 @@ impl<'de> Deserialize<'de> for GgswCiphertext {
 
 
 /// 암호화, 복호화, 동형 연산을 위한 핵심 트레이트(trait)입니다.
-pub trait QfheEngine {
+pub trait EncryptionEngine {
     fn encrypt(&self, message: u64) -> Ciphertext;
+}
+
+
+pub trait DecryptionEngine {
     fn decrypt(&self, ciphertext: &Ciphertext) -> u64;
+}
+
+pub trait EvaluationEngine {
     fn homomorphic_add(&self, ct1: &Ciphertext, ct2: &Ciphertext) -> Ciphertext;
     fn homomorphic_sub(&self, ct1: &Ciphertext, ct2: &Ciphertext) -> Ciphertext;
 

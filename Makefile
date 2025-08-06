@@ -42,7 +42,7 @@ src/core/ntt_tables.rs:
 build: $(LIB_PATH)
 	@mkdir -p bin
 	$(foreach demo,$(C_DEMOS), \
-		$(CC) demo/$(demo).c demo/run.c demo/file_io.c -I. -L$(RUST_TARGET_DIR) -lqfhe -o bin/$(demo); \
+		$(CC) demo/$(demo).c demo/file_io.c -I. -L$(RUST_TARGET_DIR) -lqfhe -o bin/$(demo); \
 		echo "  -> C demo 'bin/$(demo)' created."; \
 	)
 

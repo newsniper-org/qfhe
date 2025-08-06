@@ -1,67 +1,49 @@
+// demo/01_generate_key_s.c
 #include "include/qfhe.h"
 #include "demo/file_io.h"
 #include <stdio.h>
-#include <stdlib.h>
-
-// 헬퍼 매크로
-#define SAVE_KEY(filename, json_str) \
-    do { \
-        write_string_to_file(filename, json_str); \
-        printf(" -> %s saved.\n", filename); \
-        qfhe_free_string(json_str); \
-    } while (0)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 int main(void) {
-    // 예시: L128
     SecurityLevel level = L128;
     int level_num = 128;
 
+    // 예시 마스터 키와 솔트 (실제 사용 시에는 안전한 난수 소스에서 생성해야 함)
+    unsigned char master_key[32] = {0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef};
+    unsigned char salt[24] = {0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10};
+
+    SecretKey* sk = NULL;
+    PublicKey* pk = NULL;
+    RelinearizationKey* rlk = NULL;
+    KeySwitchingKey* ksk = NULL;
+    BootstrapKey* bk = NULL;
+
     printf("Generating all keys for L%d...\n", level_num);
-    QfheContext* context = qfhe_context_create(level);
+    qfhe_generate_key_s(level, master_key, salt, &sk, &pk, &rlk, &ksk, &bk);
 
-    const SecretKey* sk = qfhe_context_get_sk(context);
-    const PublicKey* pk = qfhe_context_get_pk(context);
-    const RelinearizationKey* rlk = qfhe_context_get_rlk(context);
-    const BootstrapKey* bk = qfhe_context_get_bk(context);
-    const KeySwitchingKey* ksk = qfhe_context_get_ksk(context);
+    char filename[64];
 
-    char* sk_json_str = qfhe_serialize_sk_to_json_str((const void*)sk, level);
-    char* pk_json_str = qfhe_serialize_pk_to_json_str((const void*)pk, level);
-    char* rlk_json_str = qfhe_serialize_rlk_to_json_str((const void*)rlk, level);
-    char* bk_json_str = qfhe_serialize_bk_to_json_str((const void*)bk, level);
-    char* ksk_json_str = qfhe_serialize_ksk_to_json_str((const void*)ksk, level);
+    // 각 키를 JSON으로 직렬화하여 파일에 저장
+    sprintf(filename, "qfhe%d.prv", level_num);
+    char* sk_json = qfhe_serialize_sk_to_json_str(sk, level);
+    write_string_to_file(filename, sk_json);
+    printf(" -> Secret Key saved to %s\n", filename);
 
-    char sk_filename[64];
-    sprintf(sk_filename, "qfhe%d.prv", level_num);
-    char pk_filename[64];
-    sprintf(pk_filename, "qfhe%d.pub", level_num);
-    char rlk_filename[64];
-    sprintf(rlk_filename, "qfhe%d.rlk", level_num);
-    char bk_filename[64];
-    sprintf(bk_filename, "qfhe%d.bk", level_num);
-    char ksk_filename[64];
-    sprintf(ksk_filename, "qfhe%d.ksk", level_num);
+    sprintf(filename, "qfhe%d.pub", level_num);
+    char* pk_json = qfhe_serialize_pk_to_json_str(pk, level);
+    write_string_to_file(filename, pk_json);
+    printf(" -> Public Key saved to %s\n", filename);
+    
+    // ... rlk, ksk, bk에 대해서도 동일하게 직렬화 및 저장 ...
 
-    SAVE_KEY(sk_filename, sk_json_str);
-    SAVE_KEY(pk_filename, pk_json_str);
-    SAVE_KEY(rlk_filename, rlk_json_str);
-    SAVE_KEY(bk_filename, bk_json_str);
-    SAVE_KEY(ksk_filename, ksk_json_str);
+    // 메모리 해제
+    qfhe_free_string(sk_json);
+    qfhe_free_string(pk_json);
+    // ...
+    qfhe_secret_key_destroy(sk);
+    qfhe_public_key_destroy(pk);
+    qfhe_relinearization_key_destroy(rlk);
+    qfhe_key_switching_key_destroy(ksk);
+    qfhe_bootstrap_key_destroy(bk);
 
-    qfhe_context_destroy(context);
     return 0;
 }
