@@ -38,7 +38,7 @@ def find_primitive_root(p):
     factors = set()
     d = 2
     temp_phi = phi
-    while d * d <= temp_phi:
+    while (d * d) <= temp_phi:
         if temp_phi % d == 0:
             factors.add(d)
             while temp_phi % d == 0:

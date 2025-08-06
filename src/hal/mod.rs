@@ -2,9 +2,11 @@
 
 use crate::core::{Ciphertext, Polynomial, SecretKey, QfheParameters, RelinearizationKey, KeySwitchingKey, BootstrapKey, PublicKey };
 
+use rand_chacha::ChaCha20Rng;
+
 pub trait HardwareBackend<'a, 'b, 'c> {
     // --- 암호화 및 복호화 ---
-    fn encrypt(&self, message: u64, pk: &PublicKey, rng: &mut ChaCha2oRng, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext;
+    fn encrypt(&self, message: u64, pk: &PublicKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext;
     fn decrypt(&self, ciphertext: &Ciphertext, sk: &SecretKey, params: &QfheParameters<'a, 'b, 'c>) -> u64;
 
 

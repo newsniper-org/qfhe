@@ -7,14 +7,26 @@ use crate::core::{
 use crate::core::rns::*;
 use crate::ntt::power;
 use super::HardwareBackend;
-use rand::Rng;
+use rand::{Rng, RngCore};
 use rand_distr::{Normal, Distribution};
 
 use crate::ntt::BarrettReducer64;
 use crate::ntt::qntt::*;
 
+use crate::core::rns::*;
+
+use rand_chacha::ChaCha20Rng;
+
 
 pub struct CpuBackend;
+
+/// 이산 가우시안 분포에서 노이즈를 샘플링합니다.
+fn sample_discrete_gaussian(noise_std_dev: f64) -> i128 {
+    let mut rng = rand::thread_rng();
+    let normal = Normal::new(0.0, noise_std_dev).unwrap();
+    normal.sample(&mut rng).round() as i128
+}
+
 
 // #region 결정론적 샘플링 헬퍼 함수
 
@@ -205,6 +217,57 @@ fn cmux(ggsw_gate: &GgswCiphertext, ct0: &Ciphertext, ct1: &Ciphertext, params: 
     CpuBackend.homomorphic_add(ct0, &term, params)
 }
 
+/// 주어진 메시지 다항식을 암호화하는 내부 함수입니다.
+fn encrypt_poly(msg_poly: &Polynomial, params: &QfheParameters, secret_key: &SecretKey) -> Ciphertext {
+    let mut rng = rand::thread_rng();
+    let k = params.module_dimension_k;
+    let n = params.polynomial_degree;
+    let rns_basis = params.modulus_q;
+    let rns_basis_size = rns_basis.len();
+
+    // a_vec: 무작위 다항식 벡터 생성 (RNS 형태)
+    let a_vec = (0..k).map(|_| {
+        let mut poly = Polynomial::zero(n, rns_basis_size);
+        for i in 0..n {
+            for j in 0..rns_basis_size {
+                // 각 쿼터니언 성분에 대해 무작위 값을 채웁니다.
+                poly.coeffs[i].w[j] = rng.gen_range(0..rns_basis[j]);
+                poly.coeffs[i].x[j] = rng.gen_range(0..rns_basis[j]);
+                poly.coeffs[i].y[j] = rng.gen_range(0..rns_basis[j]);
+                poly.coeffs[i].z[j] = rng.gen_range(0..rns_basis[j]);
+            }
+        }
+        poly
+    }).collect::<Vec<_>>();
+
+    // e: 작은 오차 다항식 생성 (RNS 형태)
+    let e_poly = {
+        let mut poly = Polynomial::zero(n, rns_basis_size);
+        for i in 0..n {
+            let noise = sample_discrete_gaussian(params.noise_std_dev);
+            // 모든 쿼터니언 성분에 노이즈를 추가합니다. (필요에 따라 주 성분에만 추가할 수도 있음)
+            poly.coeffs[i].w = integer_to_rns(noise as u128, rns_basis);
+            poly.coeffs[i].x = integer_to_rns(sample_discrete_gaussian(params.noise_std_dev) as u128, rns_basis);
+            poly.coeffs[i].y = integer_to_rns(sample_discrete_gaussian(params.noise_std_dev) as u128, rns_basis);
+            poly.coeffs[i].z = integer_to_rns(sample_discrete_gaussian(params.noise_std_dev) as u128, rns_basis);
+        }
+        poly
+    };
+    
+    // b = <a, s> + e + m 계산
+    let backend = CpuBackend;
+    let mut as_poly = Polynomial::zero(n, rns_basis_size);
+    for i in 0..k {
+        let product = backend.polynomial_mul(&a_vec[i], &secret_key.0[i], params);
+        as_poly = backend.polynomial_add(&as_poly, &product, params);
+    }
+
+    let b_poly = backend.polynomial_add(&as_poly, &e_poly, params);
+    let b_poly = backend.polynomial_add(&b_poly, msg_poly, params);
+
+    Ciphertext { a_vec, b: b_poly, modulus_level: 0 }
+}
+
 
 impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
     fn generate_public_key(&self, sk: &SecretKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>) -> PublicKey {
@@ -217,12 +280,11 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
 
         let mut b = e;
         for i in 0..k {
-            let mut a_s = a[i].clone();
-            self.polynomial_mul_assign(&mut a_s, &sk.0[i], params);
-            self.polynomial_sub_assign(&mut b, &a_s, params);
+            let mut a_s = self.polynomial_mul(&a[i], &sk.0[i], params);
+            b = self.polynomial_sub(&b, &a_s, params);
         }
 
-        PublicKey { b, a }
+        PublicKey { b, a_vec: a }
     }
 
     fn generate_secret_key(&self, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>) -> SecretKey {
@@ -247,25 +309,24 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
         
         // c0 = u*b + e0 + m*delta
         let mut c0 = self.polynomial_mul(&u, &pk.b, params);
-        self.polynomial_add_assign(&mut c0, &e0, params);
+        c0 = self.polynomial_add(&c0, &e0, params);
 
         let mut msg_poly = Polynomial::zero(n, rns_size);
         let scaled_msg = (message as u128) * params.scaling_factor_delta;
         msg_poly.coeffs[0].w = crate::core::rns::integer_to_rns(scaled_msg, params.modulus_q);
-        self.polynomial_add_assign(&mut c0, &msg_poly, params);
+        c0 = self.polynomial_add(&c0, &msg_poly, params);
 
         // c1_i = u*a_i + e_i
         let a_vec = (0..k).map(|i| {
-            let mut u_a = self.polynomial_mul(&u, &pk.a[i], params);
-            self.polynomial_add_assign(&mut u_a, &e_vec[i], params);
-            u_a
+            let u_a = self.polynomial_mul(&u, &pk.a_vec[i], params);
+            self.polynomial_add(&u_a, &e_vec[i], params)
         }).collect();
 
         Ciphertext { a_vec, b: c0, modulus_level: 0 }
     }
 
     /// 암호문을 복호화합니다. [RNS 기반]
-    fn decrypt(&self, ciphertext: &Ciphertext, params: &QfheParameters<'a, 'b, 'c>, secret_key: &SecretKey) -> u64 {
+    fn decrypt(&self, ciphertext: &Ciphertext, secret_key: &SecretKey, params: &QfheParameters<'a, 'b, 'c>) -> u64 {
         let k = params.module_dimension_k;
 
         // <a, s> 계산
@@ -374,7 +435,7 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
                 for m in 0..l {
                     let power_of_base = params.gadget_base_b.pow(m as u32);
                     let power_of_base_rns = crate::core::rns::integer_to_rns(power_of_base, params.modulus_q);
-                    let p_to_encrypt = self.polynomial_scalar_mul(&s_i_s_j, &power_of_base_rns, params);
+                    let p_to_encrypt = polynomial_scalar_mul(&s_i_s_j, &power_of_base_rns, params);
                     key_vec.push(encrypt_internal(&p_to_encrypt, sk, rng, params));
                 }
             }
@@ -449,7 +510,7 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
     }
 
     /// 키 스위칭 키를 생성합니다.
-    fn generate_keyswitching_key(&self, old_sk: &SecretKey, new_sk: &SecretKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'c>) -> KeySwitchingKey {
+    fn generate_keyswitching_key(&self, old_sk: &SecretKey, new_sk: &SecretKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>) -> KeySwitchingKey {
         let k = params.module_dimension_k;
         let l = params.gadget_levels_l;
         let mut key_levels = Vec::with_capacity(k);
@@ -458,9 +519,9 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
             let mut key_level = Vec::with_capacity(l);
             for m in 0..l {
                 let power_of_base = params.gadget_base_b.pow(m as u32);
-                let power_of_base_rns = rns::integer_to_rns(power_of_base, params.modulus_q);
+                let power_of_base_rns = crate::core::rns::integer_to_rns(power_of_base, params.modulus_q);
                 let mut p_to_encrypt = old_sk.0[i].clone();
-                self.polynomial_scalar_mul_assign(&mut p_to_encrypt, &power_of_base_rns, params);
+                p_to_encrypt = polynomial_scalar_mul(&p_to_encrypt, &power_of_base_rns, params);
                 // 새 비밀키(new_sk)로 암호화
                 key_level.push(encrypt_internal(&p_to_encrypt, new_sk, rng, params));
             }
@@ -470,7 +531,7 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
     }
 
     /// 부트스트래핑 키를 생성합니다. (LWE 비밀키를 GGSW로 암호화)
-    fn generate_bootstrap_key(&self, sk: &SecretKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'c>) -> BootstrapKey {
+    fn generate_bootstrap_key(&self, sk: &SecretKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>) -> BootstrapKey {
         let n = params.polynomial_degree;
         let l = params.gadget_levels_l;
         let mut bsk_ggsw_vector = Vec::with_capacity(n);
@@ -480,16 +541,16 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
 
         for i in 0..n {
             let s_coeff_rns = &lwe_sk_poly.coeffs[i].w;
-            let s_coeff_int = rns::rns_to_integer(s_coeff_rns, params.modulus_q);
+            let s_coeff_int = rns_to_integer(s_coeff_rns, params.modulus_q);
 
             let mut ggsw_levels = Vec::with_capacity(l);
             for m in 0..l {
                 let power_of_base = params.gadget_base_b.pow(m as u32);
                 // s_i * g^m 계산
-                let val_to_encrypt = s_coeff_int.wrapping_mul(U256::from(power_of_base));
+                let val_to_encrypt = s_coeff_int.wrapping_mul(U256::from_u128(power_of_base));
 
                 let mut p = Polynomial::zero(n, params.modulus_q.len());
-                p.coeffs[0].w = rns::integer_to_rns(val_to_encrypt.low, params.modulus_q);
+                p.coeffs[0].w = crate::core::rns::integer_to_rns(val_to_encrypt.low, params.modulus_q);
                 // LWE 비밀키의 각 계수를 GGSW 형태로 암호화
                 ggsw_levels.push(encrypt_internal(&p, sk, rng, params));
             }

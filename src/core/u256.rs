@@ -11,7 +11,11 @@ impl U256 {
     pub const ONE: Self = Self { low: 1, high: 0 };
 
     pub fn from_u64(val: u64) -> Self {
-        Self { low: val as u128, high: 0 }
+        Self { low: val as u128, high: 0u128 }
+    }
+
+    pub fn from_u128(val: u128) -> Self {
+        Self { low: val, high: 0u128 }
     }
 
     pub fn wrapping_add(self, rhs: Self) -> Self {

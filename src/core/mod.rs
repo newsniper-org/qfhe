@@ -35,6 +35,7 @@ use serde::{Serialize, Deserialize};
 
 /// C FFI에서 사용할 보안 수준 열거형입니다.
 #[repr(C)]
+#[derive(Debug, Clone, Copy)]
 pub enum SecurityLevel {
     L128,
     L160,
@@ -239,7 +240,7 @@ impl SecurityLevel {
 
 /// LWE 암호문은 (a, b) 쌍으로 구성됩니다.
 /// a는 4원수들의 벡터이고, b는 단일 4원수입니다.
-#[derive(Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Ciphertext {
     pub a_vec: Vec<Polynomial>, // k개의 다항식 벡터
     pub b: Polynomial,          // 1개의 다항식
@@ -251,6 +252,30 @@ pub struct Ciphertext {
 pub struct GgswCiphertext {
     pub levels: Vec<Ciphertext>,
 }
+
+impl Serialize for GgswCiphertext {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer {
+        self.levels.serialize::<S>(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for GgswCiphertext {
+    fn deserialize<D>(deserializer: D) -> Result<Self, <D as serde::Deserializer<'de>>::Error>
+    where
+        D: serde::Deserializer<'de> {
+        let result = Vec::<Ciphertext>::deserialize::<D>(deserializer);
+        if let Ok(levels) = result {
+            Ok(Self { levels })
+        } else {
+            let err = result.err().unwrap();
+            Err(err)
+        }
+    }
+}
+
+
 
 /// 암호화, 복호화, 동형 연산을 위한 핵심 트레이트(trait)입니다.
 pub trait QfheEngine {
