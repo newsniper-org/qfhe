@@ -1,17 +1,19 @@
 use crate::core::{
-    Ciphertext, QfheEngine, Polynomial, Quaternion, SecretKey, SecurityLevel, QfheParameters,
-    RelinearizationKey, BootstrapKey, KeySwitchingKey, GgswCiphertext
+    BootstrapKey, Ciphertext, GgswCiphertext, KeySwitchingKey, Polynomial, PublicKey, QfheEngine, QfheParameters, Quaternion, RelinearizationKey, SecretKey, SecurityLevel, MasterKey, Salt, keys::generate_keys
 };
 use crate::hal::{CpuBackend, HardwareBackend};
-use rand::Rng;
+use rand::{Rng, SeedableRng};
 
 use serde_json::{Serializer, Deserializer};
+
+use rand_chacha::ChaCha20Rng;
 
 // QfheContext에 라이프타임 'a를 추가합니다.
 #[repr(C)]
 pub struct QfheContext {
     backend: Box<dyn HardwareBackend<'static, 'static, 'static> + 'static>,
     secret_key: SecretKey,
+    public_key: PublicKey,
     relinearization_key: RelinearizationKey,
     bootstrap_key: BootstrapKey,
     keyswitching_key: KeySwitchingKey,
@@ -21,11 +23,13 @@ pub struct QfheContext {
 // QfheEngine 트레이트 구현부에도 라이프타임을 명시합니다.
 impl QfheEngine for QfheContext {
     fn encrypt(&self, message: u64) -> Ciphertext {
-        self.backend.encrypt(message, &self.params, &self.secret_key)
+        // 암호화 연산마다 새로운 임시 난수 생성기를 사용
+        let mut ephemeral_rng = ChaCha20Rng::from_os_rng();
+        self.backend.encrypt(message, &self.public_key, &mut ephemeral_rng, &self.params)
     }
 
     fn decrypt(&self, ciphertext: &Ciphertext) -> u64 {
-        self.backend.decrypt(ciphertext, &self.params, &self.secret_key)
+        self.backend.decrypt(ciphertext, &self.secret_key, &self.params)
     }
 
     fn homomorphic_add(&self, ct1: &Ciphertext, ct2: &Ciphertext) -> Ciphertext {
@@ -49,36 +53,25 @@ impl QfheEngine for QfheContext {
     }
 }
 
-// [수정] 반환 타입에 'static 라이프타임을 명시하고, RNS 기반으로 비밀키를 생성합니다.
+// [수정] RNS 기반으로 키들을 생성합니다.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn qfhe_context_create(level: SecurityLevel) -> *mut QfheContext {
+pub unsafe extern "C" fn qfhe_context_create(
+    level: SecurityLevel,
+    master_key_ptr: *const u8,
+    salt_ptr: *const u8,
+) -> *mut QfheContext {
     let params = level.get_params();
-    let mut rng = rand::rng();
-    let rns_basis_size = params.modulus_q.len();
-    
-    let secret_key_vec = (0..params.module_dimension_k).map(|_| {
-        let coeffs = (0..params.polynomial_degree).map(|_| {
-            let val: i128 = rng.random_range(-1..=1);
-            let mut w = Vec::with_capacity(rns_basis_size);
-            for &q_i in params.modulus_q {
-                w.push(val.rem_euclid(q_i as i128) as u64);
-            }
-            // 쿼터니언의 다른 성분들도 동일하게 초기화 (또는 필요에 따라 다르게)
-            Quaternion { w, x: vec![0; rns_basis_size], y: vec![0; rns_basis_size], z: vec![0; rns_basis_size] }
-        }).collect();
-        Polynomial { coeffs }
-    }).collect();
 
-    let secret_key = SecretKey(secret_key_vec);
-    
+    let master_key = MasterKey(unsafe { std::slice::from_raw_parts(master_key_ptr, 32).clone() });
+    let salt_slice = Salt(unsafe { std::slice::from_raw_parts(salt_ptr, 24).clone() });
     let backend = Box::new(CpuBackend);
-    let relinearization_key = backend.generate_relinearization_key(&secret_key, &params);
-    let bootstrap_key = backend.generate_bootstrap_key(&secret_key, &params);
-    let keyswitching_key = backend.generate_keyswitching_key(&secret_key, &secret_key, &params);
     
+    let (secret_key, public_key, keyswitching_key, relinearization_key, bootstrap_key) = generate_keys(level, master_key, salt, backend.as_ref());
+
     let context = Box::new(QfheContext { 
         backend,
         secret_key,
+        public_key,
         relinearization_key,
         bootstrap_key,
         keyswitching_key,
@@ -94,13 +87,6 @@ pub unsafe extern "C" fn qfhe_context_destroy(context_ptr: *mut QfheContext) {
     }
 }
 
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn qfhe_context_generate_public_key(context: *const QfheContext) -> *mut PublicKey {
-    let ctx = unsafe { &*context };
-    let pk = ctx.backend.generate_public_key(&ctx.secret_key, &ctx.params);
-    Box::into_raw(Box::new(pk))
-}
-
 // 공개키를 받아 암호화하는 FFI 함수
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qfhe_encrypt(
@@ -110,7 +96,7 @@ pub unsafe extern "C" fn qfhe_encrypt(
 ) -> *mut Ciphertext {
     let ctx = unsafe { &*context };
     let pk = unsafe { &*public_key };
-    let ciphertext = Box::new(ctx.backend.encrypt(message, pk, &ctx.params));
+    let ciphertext = Box::new(ctx.encrypt(message));
     Box::into_raw(ciphertext)
 }
 

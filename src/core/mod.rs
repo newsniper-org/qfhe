@@ -5,7 +5,7 @@ pub mod polynomial;
 pub use crate::core::polynomial::Polynomial;
 
 pub mod keys;
-pub use crate::core::keys::{SecretKey, RelinearizationKey, KeySwitchingKey, BootstrapKey, PublicKey};
+pub use crate::core::keys::{SecretKey, RelinearizationKey, KeySwitchingKey, BootstrapKey, PublicKey, MasterKey, Salt, generate_keys};
 
 use crate::ntt::{power, primitive_root, BarrettReducer64};
 

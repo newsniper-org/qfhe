@@ -3,7 +3,7 @@ use std::str::pattern::SearchStep;
 
 use serde::{Serialize, Deserialize};
 
-use crate::core::{SecretKey, keys::{BootstrapKey, KeySwitchingKey, RelinearizationKey}, Ciphertext, GgswCiphertext, Polynomial, Quaternion, SecurityLevel};
+use crate::core::{SecretKey, keys::{BootstrapKey, KeySwitchingKey, RelinearizationKey, PublicKey}, Ciphertext, GgswCiphertext, Polynomial, Quaternion, SecurityLevel};
 
 use hexstring::{HexString, Case};
 
@@ -21,26 +21,32 @@ impl Key for SecretKey {
         let levels = params.gadget_levels_l;
         let rns_basis_size = params.modulus_q.len();
         let correct_size = params.module_dimension_k * params.polynomial_degree * rns_basis_size * 4usize;
-        if vect.len() != correct_size {
-            serde::de::Error::custom("The payload is somehow damaged!")
-        }
-        let vec_quat = (0..correct_size).step_by(4 * rns_basis_size).map(|i| {
-            let w = vect[i..i+rns_basis_size].iter().collect::<Vec<u64>>();
-            let x = vect[i+rns_basis_size..i + 2*rns_basis_size].iter().collect::<Vec<u64>>();
-            let y = vect[i + 2*rns_basis_size..i + 3*rns_basis_size].iter().collect::<Vec<u64>>();
-            let z = vect[i + 3*rns_basis_size..i + 4*rns_basis_size].iter().collect::<Vec<u64>>();
-            Quaternion {w,x,y,z}
-        }).collect::<Vec<Quaternion>>();
-        let vec_poly = (0..(params.module_dimension_k * params.polynomial_degree)).step(params.polynomial_degree).map(|k| {
-            Polynomial {
-                coeffs: vec_quat[k..(k+params.polynomial_degree)].iter().collect()
+        let decoded = Vec::<u64>::try_from(parsed);
+        if let Ok(vect) = decoded {
+            if vect.len() != correct_size {
+                serde::de::Error::custom("The payload is somehow damaged!")
             }
-        }).collect::<Vec<Polynomial>>();
-        Ok(SecretKey(vec_poly))
+            let vec_quat = (0..correct_size).step_by(4 * rns_basis_size).map(|i| {
+                let w = vect[i..i+rns_basis_size].iter().collect::<Vec<u64>>();
+                let x = vect[i+rns_basis_size..i + 2*rns_basis_size].iter().collect::<Vec<u64>>();
+                let y = vect[i + 2*rns_basis_size..i + 3*rns_basis_size].iter().collect::<Vec<u64>>();
+                let z = vect[i + 3*rns_basis_size..i + 4*rns_basis_size].iter().collect::<Vec<u64>>();
+                Quaternion {w,x,y,z}
+            }).collect::<Vec<Quaternion>>();
+            let vec_poly = (0..(params.module_dimension_k * params.polynomial_degree)).step(params.polynomial_degree).map(|k| {
+                Polynomial {
+                    coeffs: vec_quat[k..(k+params.polynomial_degree)].iter().collect()
+                }
+            }).collect::<Vec<Polynomial>>();
+            Ok(SecretKey(vec_poly))
+        } else {
+            decoded
+        }
+        
     }
 
     fn to_serialize(&self, security_level: SecurityLevel) -> HexString<{Case::Upper}> {
-        let all_u64s = self.0.map(|p| p.coeffs).flatten().map(|quat| vec![quat.w, quat.x, quat.y, quat.z].iter().flatten().collect::<Vec<u64>>()).flatten().collect::<Vec<u64>>();
+        let all_u64s = self.0.iter().map(|p| p.coeffs).flatten().map(|quat| vec![quat.w, quat.x, quat.y, quat.z].iter().flatten().map(|&x| x).collect::<Vec<>>()).flatten().collect::<Vec<>>();
         let encoded_polys: HexString::<{Case::Upper}> = HexString::<{Case::Upper}>::from(all_u64s);
         encoded_polys
     }
@@ -54,30 +60,35 @@ impl Key for RelinearizationKey {
         let correct_ciphertext_size = (params.module_dimension_k+1) * params.polynomial_degree * rns_basis_size * 4usize;
         let correct_ciphertext_count = (params.module_dimension_k * params.module_dimension_k * levels);
         let correct_size = correct_ciphertext_count * correct_ciphertext_size;
-        if vect.len() != correct_size {
-            serde::de::Error::custom("The payload is somehow damaged!")
+        let decoded = Vec::<u64>::try_from(parsed);
+        if let Ok(vect) = decoded {
+            if vect.len() != correct_size {
+                serde::de::Error::custom("The payload is somehow damaged!")
+            }
+            let vec_quat = (0..correct_size).step_by(4 * rns_basis_size).map(|i| {
+                let w = vect[i..i+rns_basis_size].iter().collect::<Vec<u64>>();
+                let x = vect[i+rns_basis_size..i + 2*rns_basis_size].iter().collect::<Vec<u64>>();
+                let y = vect[i + 2*rns_basis_size..i + 3*rns_basis_size].iter().collect::<Vec<u64>>();
+                let z = vect[i + 3*rns_basis_size..i + 4*rns_basis_size].iter().collect::<Vec<u64>>();
+                Quaternion {w,x,y,z}
+            }).collect::<Vec<Quaternion>>();
+            let vec_poly = (0..(correct_ciphertext_count*(params.module_dimension_k+1) * params.polynomial_degree)).step(params.polynomial_degree).map(|k| {
+                Polynomial {
+                    coeffs: vec_quat[k..(k+params.polynomial_degree)].iter().collect()
+                }
+            }).collect::<Vec<Polynomial>>();
+            let vec_ct = (0..correct_ciphertext_count*(params.module_dimension_k+1)).step(params.module_dimension_k+1).map(|c| {
+                let a_vec = vec_poly[c..(c+params.module_dimension_k)].iter().collect();
+                Ciphertext {
+                    a_vec,
+                    b: vec_poly[c+params.module_dimension_k],
+                    modulus_level: 0
+                }
+            }).collect::<Vec<Ciphertext>>();
+            Ok(RelinearizationKey(vec_ct))
+        } else {
+            decoded
         }
-        let vec_quat = (0..correct_size).step_by(4 * rns_basis_size).map(|i| {
-            let w = vect[i..i+rns_basis_size].iter().collect::<Vec<u64>>();
-            let x = vect[i+rns_basis_size..i + 2*rns_basis_size].iter().collect::<Vec<u64>>();
-            let y = vect[i + 2*rns_basis_size..i + 3*rns_basis_size].iter().collect::<Vec<u64>>();
-            let z = vect[i + 3*rns_basis_size..i + 4*rns_basis_size].iter().collect::<Vec<u64>>();
-            Quaternion {w,x,y,z}
-        }).collect::<Vec<Quaternion>>();
-        let vec_poly = (0..(correct_ciphertext_count*(params.module_dimension_k+1) * params.polynomial_degree)).step(params.polynomial_degree).map(|k| {
-            Polynomial {
-                coeffs: vec_quat[k..(k+params.polynomial_degree)].iter().collect()
-            }
-        }).collect::<Vec<Polynomial>>();
-        let vec_ct = (0..correct_ciphertext_count*(params.module_dimension_k+1)).step(params.module_dimension_k+1).map(|c| {
-            let a_vec = vec_poly[c..(c+params.module_dimension_k)].iter().collect();
-            Ciphertext {
-                a_vec,
-                b: vec_poly[c+params.module_dimension_k],
-                modulus_level: 0
-            }
-        }).collect::<Vec<Ciphertext>>();
-        Ok(RelinearizationKey(vec_ct))
     }
 
     fn to_serialize(&self, security_level: SecurityLevel) -> HexString<{Case::Upper}> {
@@ -86,7 +97,7 @@ impl Key for RelinearizationKey {
             result.append(vec![ct.b]);
             result
         }).flatten().map(|p| p.coeffs).flatten().collect::<Vec<Quaternion>>();
-        let all_u64s = all_quaternions.iter().map(|quat| vec![quat.w, quat.x, quat.y, quat.z].iter().flatten().collect::<Vec<u64>>()).flatten().collect::<Vec<u64>>();
+        let all_u64s = all_quaternions.iter().map(|quat| vec![quat.w, quat.x, quat.y, quat.z].iter().flatten().map(|&x| x).collect::<Vec<>>()).flatten().collect::<Vec<>>();
         let encoded_polys: HexString::<{Case::Upper}> = HexString::<{Case::Upper}>::from(all_u64s);
         encoded_polys
     }
@@ -101,34 +112,39 @@ impl Key for KeySwitchingKey {
         let correct_ciphertext_size = (params.module_dimension_k+1) * params.polynomial_degree * rns_basis_size * 4usize;
         let correct_ciphertext_count = params.module_dimension_k* levels;
         let correct_size = correct_ciphertext_count * correct_ciphertext_size;
-        if vect.len() != correct_size {
-            serde::de::Error::custom("The payload is somehow damaged!")
+        let decoded = Vec::<u64>::try_from(parsed);
+        if let Ok(vect) = decoded {
+            if vect.len() != correct_size {
+                serde::de::Error::custom("The payload is somehow damaged!")
+            }
+            let vec_quat = (0..correct_size).step_by(4 * rns_basis_size).map(|i| {
+                let w = vect[i..i+rns_basis_size].iter().collect::<Vec<u64>>();
+                let x = vect[i+rns_basis_size..i + 2*rns_basis_size].iter().collect::<Vec<u64>>();
+                let y = vect[i + 2*rns_basis_size..i + 3*rns_basis_size].iter().collect::<Vec<u64>>();
+                let z = vect[i + 3*rns_basis_size..i + 4*rns_basis_size].iter().collect::<Vec<u64>>();
+                Quaternion {w,x,y,z}
+            }).collect::<Vec<Quaternion>>();
+            let vec_poly = (0..(correct_ciphertext_count*(params.module_dimension_k+1) * params.polynomial_degree)).step(params.polynomial_degree).map(|k| {
+                Polynomial {
+                    coeffs: vec_quat[k..(k+params.polynomial_degree)].iter().collect()
+                }
+            }).collect::<Vec<Polynomial>>();
+            let vec_ct = (0..correct_ciphertext_count*(params.module_dimension_k+1)).step(params.module_dimension_k+1).map(|c| {
+                let a_vec = vec_poly[c..(c+params.module_dimension_k)].iter().collect();
+                Ciphertext {
+                    a_vec,
+                    b: vec_poly[c+params.module_dimension_k],
+                    modulus_level: 0
+                }
+            }).collect::<Vec<Ciphertext>>();
+            let mat_ct = (0..correct_ciphertext_count).step(levels).map(|ci| {
+                let inner = vec_ct[ci..(ci+levels)].iter().map(|c| c.clone()).collect::<Vec<Ciphertext>>();
+                inner
+            }).collect::<Vec<Vec<Ciphertext>>>();
+            Ok(KeySwitchingKey { key: mat_ct })
+        } else {
+            decoded
         }
-        let vec_quat = (0..correct_size).step_by(4 * rns_basis_size).map(|i| {
-            let w = vect[i..i+rns_basis_size].iter().collect::<Vec<u64>>();
-            let x = vect[i+rns_basis_size..i + 2*rns_basis_size].iter().collect::<Vec<u64>>();
-            let y = vect[i + 2*rns_basis_size..i + 3*rns_basis_size].iter().collect::<Vec<u64>>();
-            let z = vect[i + 3*rns_basis_size..i + 4*rns_basis_size].iter().collect::<Vec<u64>>();
-            Quaternion {w,x,y,z}
-        }).collect::<Vec<Quaternion>>();
-        let vec_poly = (0..(correct_ciphertext_count*(params.module_dimension_k+1) * params.polynomial_degree)).step(params.polynomial_degree).map(|k| {
-            Polynomial {
-                coeffs: vec_quat[k..(k+params.polynomial_degree)].iter().collect()
-            }
-        }).collect::<Vec<Polynomial>>();
-        let vec_ct = (0..correct_ciphertext_count*(params.module_dimension_k+1)).step(params.module_dimension_k+1).map(|c| {
-            let a_vec = vec_poly[c..(c+params.module_dimension_k)].iter().collect();
-            Ciphertext {
-                a_vec,
-                b: vec_poly[c+params.module_dimension_k],
-                modulus_level: 0
-            }
-        }).collect::<Vec<Ciphertext>>();
-        let mat_ct = (0..correct_ciphertext_count).step(levels).map(|ci| {
-            let inner = vec_ct[ci..(ci+levels)].iter().map(|c| c.clone()).collect::<Vec<Ciphertext>>();
-            inner
-        }).collect::<Vec<Vec<Ciphertext>>>();
-        KeySwitchingKey { key: mat_ct }
     }
 
     fn to_serialize(&self, security_level: SecurityLevel) -> HexString<{Case::Upper}> {
@@ -156,34 +172,39 @@ impl Key for BootstrapKey {
         let correct_ciphertext_size = (params.module_dimension_k+1) * params.polynomial_degree * rns_basis_size * 4usize;
         let correct_ciphertext_count = params.polynomial_degree * levels;
         let correct_size = correct_ciphertext_count * correct_ciphertext_size;
-        if vect.len() != correct_size {
-            serde::de::Error::custom("The payload is somehow damaged!")
+        let decoded = Vec::<u64>::try_from(parsed);
+        if let Ok(vect) = decoded {
+                if vect.len() != correct_size {
+                serde::de::Error::custom("The payload is somehow damaged!")
+            }
+            let vec_quat = (0..correct_size).step_by(4 * rns_basis_size).map(|i| {
+                let w = vect[i..i+rns_basis_size].iter().collect::<Vec<u64>>();
+                let x = vect[i+rns_basis_size..i + 2*rns_basis_size].iter().collect::<Vec<u64>>();
+                let y = vect[i + 2*rns_basis_size..i + 3*rns_basis_size].iter().collect::<Vec<u64>>();
+                let z = vect[i + 3*rns_basis_size..i + 4*rns_basis_size].iter().collect::<Vec<u64>>();
+                Quaternion {w,x,y,z}
+            }).collect::<Vec<Quaternion>>();
+            let vec_poly = (0..(correct_ciphertext_count*(params.module_dimension_k+1) * params.polynomial_degree)).step(params.polynomial_degree).map(|k| {
+                Polynomial {
+                    coeffs: vec_quat[k..(k+params.polynomial_degree)].iter().collect()
+                }
+            }).collect::<Vec<Polynomial>>();
+            let vec_ct = (0..correct_ciphertext_count*(params.module_dimension_k+1)).step(params.module_dimension_k+1).map(|c| {
+                let a_vec = vec_poly[c..(c+params.module_dimension_k)].iter().collect();
+                Ciphertext {
+                    a_vec,
+                    b: vec_poly[c+params.module_dimension_k],
+                    modulus_level: 0
+                }
+            }).collect::<Vec<Ciphertext>>();
+            let mat_ct = (0..correct_ciphertext_count).step(levels).map(|ci| {
+                let levels = vec_ct[ci..(ci+levels)].iter().map(|c| c.clone()).collect::<Vec<Ciphertext>>();
+                GgswCiphertext { levels }
+            }).collect::<Vec<GgswCiphertext>>();
+            Ok(BootstrapKey { ggsw_vector: mat_ct })
+        } else {
+            decoded
         }
-        let vec_quat = (0..correct_size).step_by(4 * rns_basis_size).map(|i| {
-            let w = vect[i..i+rns_basis_size].iter().collect::<Vec<u64>>();
-            let x = vect[i+rns_basis_size..i + 2*rns_basis_size].iter().collect::<Vec<u64>>();
-            let y = vect[i + 2*rns_basis_size..i + 3*rns_basis_size].iter().collect::<Vec<u64>>();
-            let z = vect[i + 3*rns_basis_size..i + 4*rns_basis_size].iter().collect::<Vec<u64>>();
-            Quaternion {w,x,y,z}
-        }).collect::<Vec<Quaternion>>();
-        let vec_poly = (0..(correct_ciphertext_count*(params.module_dimension_k+1) * params.polynomial_degree)).step(params.polynomial_degree).map(|k| {
-            Polynomial {
-                coeffs: vec_quat[k..(k+params.polynomial_degree)].iter().collect()
-            }
-        }).collect::<Vec<Polynomial>>();
-        let vec_ct = (0..correct_ciphertext_count*(params.module_dimension_k+1)).step(params.module_dimension_k+1).map(|c| {
-            let a_vec = vec_poly[c..(c+params.module_dimension_k)].iter().collect();
-            Ciphertext {
-                a_vec,
-                b: vec_poly[c+params.module_dimension_k],
-                modulus_level: 0
-            }
-        }).collect::<Vec<Ciphertext>>();
-        let mat_ct = (0..correct_ciphertext_count).step(levels).map(|ci| {
-            let levels = vec_ct[ci..(ci+levels)].iter().map(|c| c.clone()).collect::<Vec<Ciphertext>>();
-            GgswCiphertext { levels }
-        }).collect::<Vec<GgswCiphertext>>();
-        BootstrapKey { ggsw_vector: mat_ct }
     }
 
     fn to_serialize(&self, security_level: SecurityLevel) -> HexString<{Case::Upper}> {
@@ -204,6 +225,50 @@ impl Key for BootstrapKey {
         encoded_polys
     }  
 }
+
+impl Key for PublicKey {
+    fn from_parsed(parsed: HexString<{Case::Upper}>, security_level: SecurityLevel) -> Result<Self, serde::de::Error> {
+        let params = security_level.get_params();
+        let levels = params.gadget_levels_l;
+        let rns_basis_size = params.modulus_q.len();
+        let module_dimension_k = params.module_dimension_k;
+        let correct_size = (module_dimension_k+1) * params.polynomial_degree * rns_basis_size * 4usize;
+        let decoded = Vec::<u64>::try_from(parsed);
+        if let Ok(vect) = decoded {
+            if vect.len() != correct_size {
+                serde::de::Error::custom("The payload is somehow damaged!")
+            }
+            let vec_quat = (0..correct_size).step_by(4 * rns_basis_size).map(|i| {
+                let w = vect[i..i+rns_basis_size].iter().collect::<Vec<u64>>();
+                let x = vect[i+rns_basis_size..i + 2*rns_basis_size].iter().collect::<Vec<u64>>();
+                let y = vect[i + 2*rns_basis_size..i + 3*rns_basis_size].iter().collect::<Vec<u64>>();
+                let z = vect[i + 3*rns_basis_size..i + 4*rns_basis_size].iter().collect::<Vec<u64>>();
+                Quaternion {w,x,y,z}
+            }).collect::<Vec<Quaternion>>();
+            let vec_poly = (0..((module_dimension_k+1) * params.polynomial_degree)).step(params.polynomial_degree).map(|k| {
+                Polynomial {
+                    coeffs: vec_quat[k..(k+params.polynomial_degree)].iter().collect()
+                }
+            }).collect::<Vec<Polynomial>>();
+            Ok(Self {
+                a: vec_poly[0..module_dimension_k].iter().collect::<Vec<Polynomial>>().clone(),
+                b: vec_poly[module_dimension_k].clone()
+            })
+        } else {
+            decoded
+        }
+        
+    }
+
+    fn to_serialize(&self, security_level: SecurityLevel) -> HexString<{Case::Upper}> {
+        let mut all_polys = self.a.clone();
+        all_polys.append(self.b);
+        let all_u64s = all_polys.iter().map(|p| p.coeffs).flatten().map(|quat| vec![quat.w, quat.x, quat.y, quat.z].iter().flatten().map(|&x| x).collect::<Vec<_>>()).flatten().collect::<Vec<>>();
+        let encoded_polys: HexString::<{Case::Upper}> = HexString::<{Case::Upper}>::from(all_u64s);
+        encoded_polys
+    }
+}
+
 
 impl Serialize for SecurityLevel {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
