@@ -2,20 +2,25 @@
 
 use crate::core::num::concat64x2;
 use crate::core::{
-    BootstrapKey, Ciphertext, GgswCiphertext, KeySwitchingKey, Polynomial, PublicKey, QfheParameters, Quaternion, RelinearizationKey, SecretKey, U256
+    BootstrapKey, Ciphertext, GgswCiphertext, KeySwitchingKey, Polynomial, PublicKey, QfheParameters, Quaternion, RelinearizationKey, SecretKey
 };
-use crate::core::rns::*;
 use crate::ntt::power;
 use super::HardwareBackend;
-use rand::{Rng, RngCore};
+use rand::{Rng, RngCore, SeedableRng};
 use rand_distr::{Normal, Distribution};
 
 use crate::ntt::BarrettReducer64;
 use crate::ntt::qntt::*;
 
+use crate::core::num::SafeModuloArith;
+
 use crate::core::rns::*;
 
 use rand_chacha::ChaCha20Rng;
+
+use rayon::prelude::*; // 병렬 처리를 위해 추가
+
+use crypto_bigint::U256;
 
 
 pub struct CpuBackend;
@@ -51,14 +56,19 @@ fn sample_uniform_poly(n: usize, rns_size: usize, rng: &mut ChaCha20Rng) -> Poly
 }
 
 /// CSPRNG를 사용하여 이산 가우시안 분포에서 작은 다항식을 샘플링합니다.
-fn sample_gaussian_poly(n: usize, rns_size: usize, std_dev: f64, rng: &mut ChaCha20Rng) -> Polynomial {
+fn sample_gaussian_poly(n: usize, rns_size: usize, std_dev: f64, rng: &mut ChaCha20Rng, params: &QfheParameters) -> Polynomial {
     let mut poly = Polynomial::zero(n, rns_size);
     let normal = Normal::new(0.0, std_dev).unwrap();
     for i in 0..n {
-        // 주 성분(w)에만 노이즈를 추가 (일반적인 방식)
         let noise = normal.sample(rng).round() as i128;
-        let rns_noise = crate::core::rns::integer_to_rns(noise as u128, &[]); // 임시
-        poly.coeffs[i].w = rns_noise;
+        // ❗ 버그 수정: params.modulus_q를 RNS 기저로 전달
+        poly.coeffs[i].w = crate::core::rns::integer_to_rns(noise.unsigned_abs(), params.modulus_q);
+        if noise < 0 {
+            // 음수 처리: q - a
+            for j in 0..rns_size {
+                poly.coeffs[i].w[j] = params.modulus_q[j] - poly.coeffs[i].w[j];
+            }
+        }
     }
     poly
 }
@@ -91,7 +101,7 @@ fn encrypt_internal(
     let backend = CpuBackend;
 
     let a_vec = (0..k).map(|_| sample_uniform_poly(n, rns_size, rng)).collect::<Vec<_>>();
-    let e_poly = sample_gaussian_poly(n, rns_size, params.noise_std_dev, rng);
+    let e_poly = sample_gaussian_poly(n, rns_size, params.noise_std_dev, rng, params);
     
     let mut as_poly = Polynomial::zero(n, rns_size);
     for i in 0..k {
@@ -127,39 +137,35 @@ fn polynomial_scalar_mul(p: &Polynomial, scalar_rns: &[u64], params: &QfheParame
 fn gadget_decompose(p: &Polynomial, params: &QfheParameters) -> Vec<Polynomial> {
     let n = params.polynomial_degree;
     let rns_basis_size = params.modulus_q.len();
-    let base = params.gadget_base_b;
+    let base = crypto_bigint::NonZero::new(U256::from_u128(params.gadget_base_b)).unwrap();
     let levels = params.gadget_levels_l;
     
     let mut decomposed_polys = vec![Polynomial::zero(n, rns_basis_size); levels];
 
     for i in 0..n {
-        // RNS 기반에서 직접 분해하지 않고, 큰 정수로 변환 후 분해합니다. (정확성 확보)
-        let w_int = rns_to_integer(&p.coeffs[i].w, params.modulus_q).low;
-        let x_int = rns_to_integer(&p.coeffs[i].x, params.modulus_q).low;
-        let y_int = rns_to_integer(&p.coeffs[i].y, params.modulus_q).low;
-        let z_int = rns_to_integer(&p.coeffs[i].z, params.modulus_q).low;
-
-        let mut current_w = w_int;
-        let mut current_x = x_int;
-        let mut current_y = y_int;
-        let mut current_z = z_int;
+        // ❗ 수정: .low를 제거하고 U256 타입으로 값을 받음
+        let mut current_w = rns_to_integer(&p.coeffs[i].w, params.modulus_q);
+        let mut current_x = rns_to_integer(&p.coeffs[i].x, params.modulus_q);
+        let mut current_y = rns_to_integer(&p.coeffs[i].y, params.modulus_q);
+        let mut current_z = rns_to_integer(&p.coeffs[i].z, params.modulus_q);
 
         for l in 0..levels {
-            let w_rem = (current_w % base) as u64;
-            let x_rem = (current_x % base) as u64;
-            let y_rem = (current_y % base) as u64;
-            let z_rem = (current_z % base) as u64;
+            // ❗ 수정: U256의 나눗셈/나머지 연산(div_rem) 사용
+            let (next_w, rem_w) = current_w.div_rem(&base);
+            let (next_x, rem_x) = current_x.div_rem(&base);
+            let (next_y, rem_y) = current_y.div_rem(&base);
+            let (next_z, rem_z) = current_z.div_rem(&base);
             
-            // 분해된 값들을 다시 RNS로 변환하여 저장
-            decomposed_polys[l].coeffs[i].w = integer_to_rns(w_rem as u128, params.modulus_q);
-            decomposed_polys[l].coeffs[i].x = integer_to_rns(x_rem as u128, params.modulus_q);
-            decomposed_polys[l].coeffs[i].y = integer_to_rns(y_rem as u128, params.modulus_q);
-            decomposed_polys[l].coeffs[i].z = integer_to_rns(z_rem as u128, params.modulus_q);
+            // 분해된 나머지(rem)는 base보다 작으므로 u128로 안전하게 변환 가능
+            decomposed_polys[l].coeffs[i].w = integer_to_rns(rem_w.to_words()[0] as u128, params.modulus_q);
+            decomposed_polys[l].coeffs[i].x = integer_to_rns(rem_x.to_words()[0] as u128, params.modulus_q);
+            decomposed_polys[l].coeffs[i].y = integer_to_rns(rem_y.to_words()[0] as u128, params.modulus_q);
+            decomposed_polys[l].coeffs[i].z = integer_to_rns(rem_z.to_words()[0] as u128, params.modulus_q);
 
-            current_w /= base;
-            current_x /= base;
-            current_y /= base;
-            current_z /= base;
+            current_w = next_w;
+            current_x = next_x;
+            current_y = next_y;
+            current_z = next_z;
         }
     }
     decomposed_polys
@@ -270,89 +276,110 @@ fn encrypt_poly(msg_poly: &Polynomial, params: &QfheParameters, secret_key: &Sec
 
 
 impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
-    fn generate_public_key(&self, sk: &SecretKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>) -> PublicKey {
+    fn generate_public_key(
+        &self, sk: &SecretKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>,
+    ) -> PublicKey {
         let k = params.module_dimension_k;
         let n = params.polynomial_degree;
         let rns_size = params.modulus_q.len();
 
-        let a = (0..k).map(|_| sample_uniform_poly(n, rns_size, rng)).collect::<Vec<_>>();
-        let e = sample_gaussian_poly(n, rns_size, params.noise_std_dev, rng);
+        // a: 무작위 다항식 벡터 생성
+        let a_vec = (0..k).map(|_| sample_uniform_poly(n, rns_size, rng)).collect::<Vec<_>>();
+        
+        // e: 작은 오차 다항식 생성
+        let e = sample_gaussian_poly(n, rns_size, params.noise_std_dev, rng, params);
 
+        // b = -(a_0*s_0 + a_1*s_1 + ...) + e
         let mut b = e;
         for i in 0..k {
-            let mut a_s = self.polynomial_mul(&a[i], &sk.0[i], params);
+            let a_s = self.polynomial_mul(&a_vec[i], &sk.0[i], params);
             b = self.polynomial_sub(&b, &a_s, params);
         }
 
-        PublicKey { b, a_vec: a }
+        PublicKey { b, a_vec }
     }
 
-    fn generate_secret_key(&self, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>) -> SecretKey {
+    fn generate_secret_key(
+        &self, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>,
+    ) -> SecretKey {
         let secret_key_vec = (0..params.module_dimension_k)
-            .map(|_| {
-                sample_ternary_poly(params.polynomial_degree, params.modulus_q.len(), params.modulus_q, rng)
-            })
+            .map(|_| sample_ternary_poly(params.polynomial_degree, params.modulus_q.len(), params.modulus_q, rng))
             .collect();
         SecretKey(secret_key_vec)
     }
 
 
-    /// 메시지를 암호화합니다. [RNS 기반]
-    fn encrypt(&self, message: u64, pk: &PublicKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext {
+    fn encrypt(
+        &self, message: u64, pk: &PublicKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>,
+    ) -> Ciphertext {
         let k = params.module_dimension_k;
         let n = params.polynomial_degree;
         let rns_size = params.modulus_q.len();
 
-        let u = sample_gaussian_poly(n, rns_size, params.noise_std_dev, rng);
-        let e0 = sample_gaussian_poly(n, rns_size, params.noise_std_dev, rng);
-        let e_vec = (0..k).map(|_| sample_gaussian_poly(n, rns_size, params.noise_std_dev, rng)).collect::<Vec<_>>();
+        // 작은 다항식 u, e0, e_vec 샘플링
+        let u = sample_gaussian_poly(n, rns_size, params.noise_std_dev, rng, params);
+        let e0 = sample_gaussian_poly(n, rns_size, params.noise_std_dev, rng, params);
+        let e_vec = (0..k)
+            .map(|_| sample_gaussian_poly(n, rns_size, params.noise_std_dev, rng, params))
+            .collect::<Vec<_>>();
         
-        // c0 = u*b + e0 + m*delta
-        let mut c0 = self.polynomial_mul(&u, &pk.b, params);
+        // c0 = pk.b * u + e0 + m*Δ
+        let mut c0 = self.polynomial_mul(&pk.b, &u, params);
         c0 = self.polynomial_add(&c0, &e0, params);
-
+        
         let mut msg_poly = Polynomial::zero(n, rns_size);
         let scaled_msg = (message as u128) * params.scaling_factor_delta;
         msg_poly.coeffs[0].w = crate::core::rns::integer_to_rns(scaled_msg, params.modulus_q);
         c0 = self.polynomial_add(&c0, &msg_poly, params);
 
-        // c1_i = u*a_i + e_i
-        let a_vec = (0..k).map(|i| {
-            let u_a = self.polynomial_mul(&u, &pk.a_vec[i], params);
-            self.polynomial_add(&u_a, &e_vec[i], params)
-        }).collect();
+        // c_i = pk.a_i * u + e_i
+        let a_vec = (0..k)
+            .map(|i| {
+                let u_a = self.polynomial_mul(&pk.a_vec[i], &u, params);
+                self.polynomial_add(&u_a, &e_vec[i], params)
+            })
+            .collect();
 
-        Ciphertext { a_vec, b: c0, modulus_level: 0 }
+        // 최종 암호문 (c_0, c_1, ...) => (b, a_vec)
+        Ciphertext { b: c0, a_vec, modulus_level: 0 }
     }
 
-    /// 암호문을 복호화합니다. [RNS 기반]
-    fn decrypt(&self, ciphertext: &Ciphertext, secret_key: &SecretKey, params: &QfheParameters<'a, 'b, 'c>) -> u64 {
+    // --- ❗❗❗ 3. 복호화 로직 수정 ❗❗❗ ---
+    /// 암호문을 복호화합니다. [crypto-bigint::U256 적용 최종본]
+    /// 암호문을 복호화합니다. [최종 안정화 버전]
+    fn decrypt(
+        &self,
+        ciphertext: &Ciphertext,
+        secret_key: &SecretKey,
+        params: &QfheParameters<'a, 'b, 'c>,
+    ) -> u64 {
         let k = params.module_dimension_k;
 
-        // <a, s> 계산
-        let mut as_poly = Polynomial::zero(params.polynomial_degree, params.modulus_q.len());
+        // --- ❗❗❗ 핵심 수정: c_0 + <c_1, s> 를 계산 ❗❗❗ ---
+        // 1. noisy_poly를 암호문의 첫 번째 부분(b)으로 초기화
+        let mut noisy_poly = ciphertext.b.clone();
+
+        // 2. 암호문의 두 번째 부분(a_vec)과 비밀키(s)를 곱하여 더함
         for i in 0..k {
-            let product = self.polynomial_mul(&ciphertext.a_vec[i], &secret_key.0[i], params);
-            as_poly = self.polynomial_add(&as_poly, &product, params);
+            let a_s = self.polynomial_mul(&ciphertext.a_vec[i], &secret_key.0[i], params);
+            noisy_poly = self.polynomial_add(&noisy_poly, &a_s, params);
         }
+        
+        // 3. CRT를 사용하여 RNS 표현을 U256 정수로 복원
+        let noisy_message = crate::core::rns::rns_to_integer(&noisy_poly.coeffs[0].w, params.modulus_q);
 
-        // m' = b - <a, s> (RNS 상에서)
-        let m_prime_poly = self.polynomial_sub(&ciphertext.b, &as_poly, params);
+        // 4. 안정적인 정수 기반 디코딩 (변경 없음)
+        let delta = U256::from(params.scaling_factor_delta);
+        let half_delta = delta.div_rem(&crypto_bigint::NonZero::new(U256::from(2u64)).unwrap()).0;
         
-        // 첫 번째 계수의 RNS 표현을 가져옴 (상수항)
-        let noisy_message_rns = &m_prime_poly.coeffs[0].w;
+        let rounded = noisy_message.wrapping_add(&half_delta).div_rem(&crypto_bigint::NonZero::new(delta).unwrap()).0;
 
-        // CRT를 사용하여 RNS 표현을 큰 정수로 복원
-        let noisy_message = rns_to_integer(noisy_message_rns, params.modulus_q);
-        
-        // 디코딩 (가장 가까운 메시지로 반올림)
-        let scaled_message = noisy_message.low; // U256의 low 128비트만 사용
-        let decrypted_val = (scaled_message + params.scaling_factor_delta / 2) / params.scaling_factor_delta;
-        
-        decrypted_val as u64
+        let final_val = rounded.to_words()[0];
+        final_val % params.plaintext_modulus as u64
     }
 
-    /// 두 다항식을 더합니다. [RNS 기반]
+
+    /// 두 다항식을 더합니다. [RNS 기반, 안전한 모듈러 연산 적용]
     fn polynomial_add(&self, p1: &Polynomial, p2: &Polynomial, params: &QfheParameters<'a, 'b, 'c>) -> Polynomial {
         let n = params.polynomial_degree;
         let rns_basis_size = params.modulus_q.len();
@@ -361,16 +388,16 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
         for i in 0..n {
             for j in 0..rns_basis_size {
                 let q_j = params.modulus_q[j];
-                res.coeffs[i].w[j] = (p1.coeffs[i].w[j] + p2.coeffs[i].w[j]) % q_j;
-                res.coeffs[i].x[j] = (p1.coeffs[i].x[j] + p2.coeffs[i].x[j]) % q_j;
-                res.coeffs[i].y[j] = (p1.coeffs[i].y[j] + p2.coeffs[i].y[j]) % q_j;
-                res.coeffs[i].z[j] = (p1.coeffs[i].z[j] + p2.coeffs[i].z[j]) % q_j;
+                res.coeffs[i].w[j] = p1.coeffs[i].w[j].safe_add_mod(p2.coeffs[i].w[j], q_j);
+                res.coeffs[i].x[j] = p1.coeffs[i].x[j].safe_add_mod(p2.coeffs[i].x[j], q_j);
+                res.coeffs[i].y[j] = p1.coeffs[i].y[j].safe_add_mod(p2.coeffs[i].y[j], q_j);
+                res.coeffs[i].z[j] = p1.coeffs[i].z[j].safe_add_mod(p2.coeffs[i].z[j], q_j);
             }
         }
         res
     }
 
-    /// 두 다항식을 뺍니다. [RNS 기반]
+    /// 두 다항식을 뺍니다. [RNS 기반, 안전한 모듈러 연산 적용]
     fn polynomial_sub(&self, p1: &Polynomial, p2: &Polynomial, params: &QfheParameters<'a, 'b, 'c>) -> Polynomial {
         let n = params.polynomial_degree;
         let rns_basis_size = params.modulus_q.len();
@@ -379,10 +406,10 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
         for i in 0..n {
             for j in 0..rns_basis_size {
                 let q_j = params.modulus_q[j];
-                res.coeffs[i].w[j] = (p1.coeffs[i].w[j] + q_j - p2.coeffs[i].w[j]) % q_j;
-                res.coeffs[i].x[j] = (p1.coeffs[i].x[j] + q_j - p2.coeffs[i].x[j]) % q_j;
-                res.coeffs[i].y[j] = (p1.coeffs[i].y[j] + q_j - p2.coeffs[i].y[j]) % q_j;
-                res.coeffs[i].z[j] = (p1.coeffs[i].z[j] + q_j - p2.coeffs[i].z[j]) % q_j;
+                res.coeffs[i].w[j] = p1.coeffs[i].w[j].safe_sub_mod(p2.coeffs[i].w[j], q_j);
+                res.coeffs[i].x[j] = p1.coeffs[i].x[j].safe_sub_mod(p2.coeffs[i].x[j], q_j);
+                res.coeffs[i].y[j] = p1.coeffs[i].y[j].safe_sub_mod(p2.coeffs[i].y[j], q_j);
+                res.coeffs[i].z[j] = p1.coeffs[i].z[j].safe_sub_mod(p2.coeffs[i].z[j], q_j);
             }
         }
         res
@@ -531,63 +558,82 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
     }
 
     /// 부트스트래핑 키를 생성합니다. (LWE 비밀키를 GGSW로 암호화)
-    fn generate_bootstrap_key(&self, sk: &SecretKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>) -> BootstrapKey {
+    fn generate_bootstrap_key(
+        &self,
+        sk: &SecretKey,
+        rng: &mut ChaCha20Rng,
+        params: &QfheParameters<'a, 'b, 'c>,
+    ) -> BootstrapKey {
         let n = params.polynomial_degree;
         let l = params.gadget_levels_l;
-        let mut bk_ggsw_vector = Vec::with_capacity(n);
-
-        // LWE 비밀키는 RLWE 비밀키의 첫 번째 다항식(s_0)의 계수들로 간주
         let lwe_sk_poly = &sk.0[0];
 
-        for i in 0..n {
-            let s_coeff_rns = &lwe_sk_poly.coeffs[i].w;
-            let s_coeff_int = rns_to_integer(s_coeff_rns, params.modulus_q);
-
-            let mut ggsw_levels = Vec::with_capacity(l);
-            for m in 0..l {
-                let power_of_base = params.gadget_base_b.pow(m as u32);
-                // s_i * g^m 계산
-                let val_to_encrypt = s_coeff_int.wrapping_mul(U256::from_u128(power_of_base));
-
-                let mut p = Polynomial::zero(n, params.modulus_q.len());
-                p.coeffs[0].w = crate::core::rns::integer_to_rns(val_to_encrypt.low, params.modulus_q);
-                // LWE 비밀키의 각 계수를 GGSW 형태로 암호화
-                ggsw_levels.push(encrypt_internal(&p, sk, rng, params));
-            }
-            bk_ggsw_vector.push(GgswCiphertext { levels: ggsw_levels });
+        // Rayon을 사용하여 병렬 처리
+        let mut seeds: Vec<[u8; 32]> = Vec::with_capacity(n);
+        for _ in 0..n {
+            seeds.push(rng.r#gen());
         }
-        BootstrapKey { ggsw_vector: bk_ggsw_vector }
+
+        let bsk_ggsw_vector: Vec<GgswCiphertext> = (0..n)
+            .into_par_iter()
+            .map(|i| {
+                let mut thread_rng = ChaCha20Rng::from_seed(seeds[i]);
+                let s_coeff_rns = &lwe_sk_poly.coeffs[i].w;
+                let s_coeff_int = rns_to_integer(s_coeff_rns, params.modulus_q);
+
+                let mut ggsw_levels = Vec::with_capacity(l);
+                for m in 0..l {
+                    let power_of_base = params.gadget_base_b.pow(m as u32);
+                    
+                    // --- ❗❗❗ 핵심 버그 수정 ❗❗❗ ---
+                    // ❗ 수정: crypto_bigint::U256의 곱셈 API 사용
+                    let val_to_encrypt = s_coeff_int.wrapping_mul(&U256::from_u128(power_of_base));
+
+                    let mut p = Polynomial::zero(n, params.modulus_q.len());
+                    // ❗ 수정: to_words()[0]를 사용하여 u64로 변환 후 u128로 캐스팅
+                    p.coeffs[0].w = integer_to_rns(val_to_encrypt.to_words()[0] as u128, params.modulus_q);
+                    
+                    ggsw_levels.push(encrypt_internal(&p, sk, &mut thread_rng, params));
+                }
+                GgswCiphertext { levels: ggsw_levels }
+            })
+            .collect();
+
+        BootstrapKey {
+            ggsw_vector: bsk_ggsw_vector,
+        }
     }
     
     /// 프로그래머블 부트스트래핑을 수행합니다. [구현 완료]
-    fn bootstrap(&self, ct: &Ciphertext, test_poly: &Polynomial, bk: &BootstrapKey, ksk: &KeySwitchingKey, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext {
+    fn bootstrap(
+        &self,
+        ct: &Ciphertext,
+        test_poly: &Polynomial,
+        bk: &BootstrapKey,
+        ksk: &KeySwitchingKey,
+        params: &QfheParameters<'a, 'b, 'c>,
+    ) -> Ciphertext {
         let n = params.polynomial_degree;
         let k = params.module_dimension_k;
-        let rns_basis_size = params.modulus_q.len();
 
-        // --- 1. Modulus Switch (Sample Extract) ---
-        // 암호문을 작은 모듈러스 2N으로 내립니다.
-        let bootstrap_modulus = 2 * n as u64;
-        let p_prime = params.plaintext_modulus as u64; // 복호화 시 사용할 평문 모듈러스
+        // --- ❗❗❗ 1. 올바른 Modulus Switch (Sample Extract) 로직 ❗❗❗ ---
+        // 부트스트래핑을 위한 임시 파라미터 생성 (더 작은 모듈러스 사용)
+        let bootstrap_modulus = (2 * n) as u128;
+        let temp_params = QfheParameters {
+            modulus_q: &[(2 * n) as u64], // 임시 모듈러스
+            modulus_chain: &[bootstrap_modulus],
+            reducers: &[BarrettReducer64::new((2*n) as u64)],
+            ..params.clone()
+        };
+        
+        // 암호문을 작은 모듈러스 2N으로 스위칭
+        let switched_ct = self.modulus_switch(ct, &temp_params);
 
-        // b - <a,s> 계산 후 모듈러스 변환
-        let mut as_poly = Polynomial::zero(n, rns_basis_size);
-        for i in 0..k {
-            as_poly = self.polynomial_add(&as_poly, &self.polynomial_mul(&ct.a_vec[i], &SecretKey(vec![bk.ggsw_vector[i].levels[0].b.clone()]).0[0], params), params);
-        }
-        let phase = self.polynomial_sub(&ct.b, &as_poly, params);
-
-        let phase_coeff_int = rns_to_integer(&phase.coeffs[0].w, params.modulus_q).low;
-        let b_bar = (phase_coeff_int * (2 * n) as u128 / params.modulus_q.iter().map(|&x| x as u128).product::<u128>()) % (2 * n as u128);
-
-        let mut a_bar = Vec::with_capacity(n);
-        for i in 0..n {
-             let a_coeff_int = rns_to_integer(&ct.a_vec[0].coeffs[i].w, params.modulus_q).low;
-             a_bar.push((a_coeff_int * (2 * n) as u128 / params.modulus_q.iter().map(|&x| x as u128).product::<u128>()) % (2 * n as u128));
-        }
+        // 스위칭된 암호문의 계수들을 b_bar와 a_bar로 사용
+        let b_bar = switched_ct.b.coeffs[0].w[0];
+        let a_bar: Vec<u64> = switched_ct.a_vec[0].coeffs.iter().map(|c| c.w[0]).collect();
 
         // --- 2. 블라인드 회전 (Blind Rotation) ---
-        // v(X) = X^{-b_bar} * f(X)
         let mut accumulator = {
             let mut poly = test_poly.clone();
             let rotated_coeffs: Vec<Quaternion> = (0..n).map(|i| {
@@ -595,22 +641,23 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
                 test_poly.coeffs[rotated_index].clone()
             }).collect();
             poly.coeffs = rotated_coeffs;
-            encrypt_poly(&poly, params, &SecretKey(vec![])) // 자명한 암호화 (0으로 암호화된 비밀키)
+            
+            let mut dummy_rng = ChaCha20Rng::from_seed([0u8; 32]);
+            // 자명한 암호화 (비밀키가 0인 암호문)
+            encrypt_internal(&poly, &SecretKey(vec![Polynomial::zero(n, params.modulus_q.len())]), &mut dummy_rng, params)
         };
 
-        // ACC = ACC * ∏ CMUX(a_bar_i, 1, X^{-2^i})
+        // ... (이후 CMUX 및 Key Switching 부분은 변경 없음) ...
         for i in 0..n {
             let control_bit_ggsw = &bk.ggsw_vector[i]; // GGSW(s_i)
             
-            // X^{-2^i} 계산 (회전 다항식)
-            let mut rot_poly = Polynomial::zero(n, rns_basis_size);
+            let mut rot_poly = Polynomial::zero(n, params.modulus_q.len());
             let rot_index = (n - (1 << i)) % n;
-            rot_poly.coeffs[rot_index].w = integer_to_rns(1, params.modulus_q);
-            let rot_poly_ct = encrypt_poly(&rot_poly, params, &SecretKey(vec![])); // 자명한 암호화
-
-            // CMUX(a_bar_i, 1, rot_poly_ct) 를 계산하는 것과 같음
-            // g=a_bar_i, ct0=1(암호문), ct1=X^{-2^i}(암호문)
-            let one_ct = encrypt_poly(&Polynomial::zero(n, rns_basis_size), params, &SecretKey(vec![])); // 1은 0을 암호화
+            rot_poly.coeffs[rot_index].w = crate::core::rns::integer_to_rns(1, params.modulus_q);
+            
+            let mut dummy_rng = ChaCha20Rng::from_seed([0u8; 32]);
+            let rot_poly_ct = encrypt_internal(&rot_poly, &SecretKey(vec![Polynomial::zero(n, params.modulus_q.len())]), &mut dummy_rng, params);
+            let one_ct = encrypt_internal(&Polynomial::zero(n, params.modulus_q.len()), &SecretKey(vec![Polynomial::zero(n, params.modulus_q.len())]), &mut dummy_rng, params);
             
             let term = if a_bar[i] != 0 {
                 cmux(control_bit_ggsw, &one_ct, &rot_poly_ct, params)
@@ -657,7 +704,11 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
     }
     
     /// 암호문의 모듈러스를 한 단계 낮춥니다.
-    fn modulus_switch(&self, ct: &Ciphertext, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext {
+    fn modulus_switch(
+        &self,
+        ct: &Ciphertext,
+        params: &QfheParameters<'a, 'b, 'c>,
+    ) -> Ciphertext {
         let from_basis = &params.modulus_q[..ct.b.coeffs[0].w.len()];
         if from_basis.len() <= 1 {
             // 이미 가장 낮은 레벨이므로 변환 불가
@@ -670,11 +721,18 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
             let n = p.coeffs.len();
             let mut new_poly = Polynomial::zero(n, to_basis.len());
             for i in 0..n {
-                // 각 쿼터니언 성분을 변환
-                new_poly.coeffs[i].w = integer_to_rns(rns_to_integer(&p.coeffs[i].w, from_basis).low, to_basis);
-                new_poly.coeffs[i].x = integer_to_rns(rns_to_integer(&p.coeffs[i].x, from_basis).low, to_basis);
-                new_poly.coeffs[i].y = integer_to_rns(rns_to_integer(&p.coeffs[i].y, from_basis).low, to_basis);
-                new_poly.coeffs[i].z = integer_to_rns(rns_to_integer(&p.coeffs[i].z, from_basis).low, to_basis);
+                // --- ❗❗❗ 핵심 버그 수정 ❗❗❗ ---
+                // ❗ 수정: to_words()[0]를 사용하여 u64로 변환 후 u128로 캐스팅
+                let w_int = rns_to_integer(&p.coeffs[i].w, from_basis).to_words()[0] as u128;
+                let x_int = rns_to_integer(&p.coeffs[i].x, from_basis).to_words()[0] as u128;
+                let y_int = rns_to_integer(&p.coeffs[i].y, from_basis).to_words()[0] as u128;
+                let z_int = rns_to_integer(&p.coeffs[i].z, from_basis).to_words()[0] as u128;
+                
+                // 새로운 RNS 기저로 변환
+                new_poly.coeffs[i].w = integer_to_rns(w_int, to_basis);
+                new_poly.coeffs[i].x = integer_to_rns(x_int, to_basis);
+                new_poly.coeffs[i].y = integer_to_rns(y_int, to_basis);
+                new_poly.coeffs[i].z = integer_to_rns(z_int, to_basis);
             }
             new_poly
         };

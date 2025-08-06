@@ -5,7 +5,7 @@ pub mod polynomial;
 pub use crate::core::polynomial::Polynomial;
 
 pub mod keys;
-pub use crate::core::keys::{SecretKey, RelinearizationKey, KeySwitchingKey, BootstrapKey, PublicKey, MasterKey, Salt, generate_key_s};
+pub use crate::core::keys::{SecretKey, RelinearizationKey, KeySwitchingKey, BootstrapKey, PublicKey, MasterKey, Salt, generate_keys};
 
 use crate::ntt::{power, primitive_root, BarrettReducer64};
 
@@ -25,8 +25,7 @@ pub use crate::core::consts::{n1024, n2048};
 pub mod num;
 pub use crate::core::num::{SafeModuloArith, concat64x2};
 
-pub(crate) mod u256;
-pub(crate) use crate::core::u256::U256;
+use crypto_bigint::U256;
 
 pub(crate) mod wide_arith;
 pub(crate) use crate::core::wide_arith::WideningArith;

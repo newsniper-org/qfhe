@@ -92,7 +92,6 @@ fn ntt_cooley_tukey_radix4(data: &mut [u64], n: usize, q: u64, w_primitive: u64,
     let mut len = 4;
     while len <= n {
         let w_len = power(w_primitive, (n / len) as u64, q);
-        // [버그 수정] par_chunks_mut을 순차적인 for 루프로 변경하여 중첩 병렬화 제거
         for i in (0..n).step_by(len) {
             let chunk = &mut data[i..i+len];
             let mut w1: u64 = 1;
@@ -110,18 +109,18 @@ fn ntt_cooley_tukey_radix4(data: &mut [u64], n: usize, q: u64, w_primitive: u64,
                 let u2 = reducer.reduce(concat64x2(chunk[idx2].widening_mul(w2)));
                 let u3 = reducer.reduce(concat64x2(chunk[idx3].widening_mul(w3)));
 
-                // --- ❗❗❗ 버그 수정: 안전한 모듈러 연산으로 변경 ❗❗❗ ---
+                // --- ❗❗❗ 핵심 버그 수정: 안전한 모듈러 연산으로 최종 변경 ❗❗❗ ---
                 let t0 = u0.safe_add_mod(u2, q);
                 let t1 = u1.safe_add_mod(u3, q);
                 let t2 = u0.safe_sub_mod(u2, q);
                 let t3 = u1.safe_sub_mod(u3, q);
                 
-                let t3_times_im = reducer.reduce(concat64x2(t3.widening_mul(im_factor)));
+                let t3_times_im = t3.safe_mul_mod(im_factor, q);
 
-                chunk[idx0] = (t0 + t1) % q;
-                chunk[idx1] = (t2 + q - t3_times_im) % q;
-                chunk[idx2] = (t0 + q - t1) % q;
-                chunk[idx3] = (t2 + t3_times_im) % q;
+                chunk[idx0] = t0.safe_add_mod(t1, q);
+                chunk[idx1] = t2.safe_sub_mod(t3_times_im, q);
+                chunk[idx2] = t0.safe_sub_mod(t1, q);
+                chunk[idx3] = t2.safe_add_mod(t3_times_im, q);
 
                 w1 = w1.safe_mul_mod(w_len, q);
             }

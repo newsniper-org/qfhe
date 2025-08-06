@@ -1,15 +1,26 @@
-// demo/01_generate_key_s.c
+// demo/01_generate_keys.c
+
 #include "include/qfhe.h"
-#include "demo/file_io.h"
+// #include "demo/file_io.h" // 더 이상 필요 없음
 #include <stdio.h>
+
+// 헬퍼 매크로
+#define GENERATE_AND_SAVE_KEY(key_ptr, key_type_enum, level, level_num, suffix) \
+    do { \
+        char filename[64]; \
+        sprintf(filename, "qfhe%d.%s", level_num, suffix); \
+        if (qfhe_serialize_key_to_file((const void*)key_ptr, key_type_enum, level, filename) == 0) { \
+            printf(" -> %s saved.\n", filename); \
+        } else { \
+            fprintf(stderr, "Error: Failed to save %s\n", filename); \
+        } \
+    } while (0)
 
 int main(void) {
     SecurityLevel level = L128;
     int level_num = 128;
-
-    // 예시 마스터 키와 솔트 (실제 사용 시에는 안전한 난수 소스에서 생성해야 함)
-    unsigned char master_key[32] = {0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef};
-    unsigned char salt[24] = {0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10};
+    unsigned char master_key[32] = {0};
+    unsigned char salt[24] = {0};
 
     SecretKey* sk = NULL;
     PublicKey* pk = NULL;
@@ -18,27 +29,16 @@ int main(void) {
     BootstrapKey* bk = NULL;
 
     printf("Generating all keys for L%d...\n", level_num);
-    qfhe_generate_key_s(level, master_key, salt, &sk, &pk, &rlk, &ksk, &bk);
+    qfhe_generate_keys(level, master_key, salt, &sk, &pk, &rlk, &ksk, &bk);
 
-    char filename[64];
-
-    // 각 키를 JSON으로 직렬화하여 파일에 저장
-    sprintf(filename, "qfhe%d.prv", level_num);
-    char* sk_json = qfhe_serialize_sk_to_json_str(sk, level);
-    write_string_to_file(filename, sk_json);
-    printf(" -> Secret Key saved to %s\n", filename);
-
-    sprintf(filename, "qfhe%d.pub", level_num);
-    char* pk_json = qfhe_serialize_pk_to_json_str(pk, level);
-    write_string_to_file(filename, pk_json);
-    printf(" -> Public Key saved to %s\n", filename);
-    
-    // ... rlk, ksk, bk에 대해서도 동일하게 직렬화 및 저장 ...
+    // ❗ 새로운 FFI 함수를 사용하여 파일에 직접 저장
+    GENERATE_AND_SAVE_KEY(sk, SK, level, level_num, "prv");
+    GENERATE_AND_SAVE_KEY(pk, PK, level, level_num, "pub");
+    GENERATE_AND_SAVE_KEY(rlk, RLK, level, level_num, "rlk");
+    GENERATE_AND_SAVE_KEY(ksk, KSK, level, level_num, "ksk");
+    GENERATE_AND_SAVE_KEY(bk, BK, level, level_num, "bk");
 
     // 메모리 해제
-    qfhe_free_string(sk_json);
-    qfhe_free_string(pk_json);
-    // ...
     qfhe_secret_key_destroy(sk);
     qfhe_public_key_destroy(pk);
     qfhe_relinearization_key_destroy(rlk);

@@ -1,9 +1,10 @@
 use std::ffi::CString;
 
 use std::ffi::CStr;
+use std::io::BufWriter;
 
 use crate::core::{
-    BootstrapKey, Ciphertext, GgswCiphertext, KeySwitchingKey, Polynomial, PublicKey, QfheParameters, Quaternion, RelinearizationKey, SecretKey, SecurityLevel, MasterKey, Salt, keys::generate_key_s,
+    BootstrapKey, Ciphertext, GgswCiphertext, KeySwitchingKey, Polynomial, PublicKey, QfheParameters, Quaternion, RelinearizationKey, SecretKey, SecurityLevel, MasterKey, Salt, keys::generate_keys,
     EncryptionEngine, DecryptionEngine, EvaluationEngine,
 };
 use crate::hal::{CpuBackend, HardwareBackend};
@@ -22,6 +23,8 @@ use rand_core::{OsRng, RngCore};
 use std::ffi::c_char;
 
 use crate::serialization::Key;
+
+use std::fs::File;
 
 
 // #################################################################
@@ -144,7 +147,7 @@ impl EvaluationEngine for EvaluationContext {
 // #################################################################
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn qfhe_generate_key_s(
+pub unsafe extern "C" fn qfhe_generate_keys(
     level: SecurityLevel,
     master_key_ptr: *const u8,
     salt_ptr: *const u8,
@@ -158,7 +161,7 @@ pub unsafe extern "C" fn qfhe_generate_key_s(
     let salt = Salt((*unsafe { std::slice::from_raw_parts(salt_ptr, 24) }).try_into().unwrap());
     let backend = CpuBackend;
 
-    let (sk, pk, ksk, rlk, bk) = generate_key_s(level, &master_key, &salt, &backend);
+    let (sk, pk, ksk, rlk, bk) = generate_keys(level, &master_key, &salt, &backend);
 
     unsafe { *sk_out = Box::into_raw(Box::new(sk)) };
     unsafe { *pk_out = Box::into_raw(Box::new(pk)) };
@@ -235,20 +238,20 @@ pub unsafe extern "C" fn qfhe_encrypt(context: *const EncryptionContext, message
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qfhe_decrypt(context: *const DecryptionContext, ct: *const Ciphertext) -> u64 {
-    let ctx = &unsafe { &*context };
+    let ctx = unsafe { &*context };
     ctx.backend.decrypt(unsafe { &*ct }, &ctx.secret_key, &ctx.params)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qfhe_homomorphic_add(context: *const EvaluationContext, ct1: *const Ciphertext, ct2: *const Ciphertext) -> *mut Ciphertext {
-    let ctx = &unsafe { &*context };
+    let ctx = unsafe { &*context };
     let res = ctx.backend.homomorphic_add(unsafe { &*ct1 }, unsafe { &*ct2 }, &ctx.params);
     Box::into_raw(Box::new(res))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qfhe_homomorphic_sub(context: *const EvaluationContext, ct1: *const Ciphertext, ct2: *const Ciphertext) -> *mut Ciphertext {
-    let ctx = &unsafe { &*context };
+    let ctx = unsafe { &*context };
     let res = ctx.backend.homomorphic_sub(unsafe { &*ct1 }, unsafe { &*ct2 }, &ctx.params);
     Box::into_raw(Box::new(res))
 }
@@ -256,7 +259,7 @@ pub unsafe extern "C" fn qfhe_homomorphic_sub(context: *const EvaluationContext,
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qfhe_homomorphic_mul(context: *const EvaluationContext, ct1: *const Ciphertext, ct2: *const Ciphertext) -> *mut Ciphertext {
-    let ctx = &unsafe { &*context };
+    let ctx = unsafe { &*context };
     let res = ctx.backend.homomorphic_mul(unsafe { &*ct1 }, unsafe { &*ct2 }, &ctx.relinearization_key, &ctx.params);
     Box::into_raw(Box::new(res))
 }
@@ -383,4 +386,95 @@ pub unsafe extern "C" fn qfhe_bootstrap_key_destroy(obj: *mut BootstrapKey) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qfhe_key_switching_key_destroy(obj: *mut KeySwitchingKey) {
     unsafe { key_destroy(obj) };
+}
+
+
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qfhe_serialize_key_to_file(
+    key_ptr: *const u8, // C의 void* 역할
+    key_type: KeyType,
+    level: SecurityLevel,
+    path_str: *const c_char,
+) -> i32 {
+    let path = unsafe { CStr::from_ptr(path_str).to_str().unwrap() };
+    let file = match File::create(path) {
+        Ok(f) => f,
+        Err(_) => return -1,
+    };
+    let writer = BufWriter::new(file);
+
+    let result = match key_type {
+        KeyType::SK => serde_json::to_writer(writer, &KeyObject::new(unsafe { &*(key_ptr as *const SecretKey) }.clone(), level)),
+        KeyType::PK => serde_json::to_writer(writer, &KeyObject::new(unsafe { &*(key_ptr as *const PublicKey) }.clone(), level)),
+        KeyType::RLK => serde_json::to_writer(writer, &KeyObject::new(unsafe { &*(key_ptr as *const RelinearizationKey) }.clone(), level)),
+        KeyType::BK => serde_json::to_writer(writer, &KeyObject::new(unsafe { &*(key_ptr as *const BootstrapKey) }.clone(), level)),
+        KeyType::KSK => serde_json::to_writer(writer, &KeyObject::new(unsafe { &*(key_ptr as *const KeySwitchingKey) }.clone(), level)),
+    };
+
+    if result.is_ok() { 0 } else { -1 }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qfhe_deserialize_key_from_file(
+    key_type: KeyType,
+    path_str: *const c_char,
+) -> *mut u8 { // C의 void* 역할
+    let path = unsafe { CStr::from_ptr(path_str).to_str().unwrap() };
+    let json_str: String = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => return std::ptr::null_mut(),
+    };
+
+    match key_type {
+        KeyType::SK => {
+            let key_obj: KeyObject<SecretKey> = serde_json::from_str(json_str.as_str()).unwrap();
+            Box::into_raw(Box::new(key_obj.clone_payload())) as *mut u8
+        },
+        KeyType::PK => {
+            let key_obj: KeyObject<PublicKey> = serde_json::from_str(json_str.as_str()).unwrap();
+            Box::into_raw(Box::new(key_obj.clone_payload())) as *mut u8
+        },
+        KeyType::RLK => {
+            let key_obj: KeyObject<RelinearizationKey> = serde_json::from_str(json_str.as_str()).unwrap();
+            Box::into_raw(Box::new(key_obj.clone_payload())) as *mut u8
+        },
+        KeyType::BK => {
+            let key_obj: KeyObject<BootstrapKey> = serde_json::from_str(json_str.as_str()).unwrap();
+            Box::into_raw(Box::new(key_obj.clone_payload())) as *mut u8
+        },
+        KeyType::KSK => {
+            let key_obj: KeyObject<KeySwitchingKey> = serde_json::from_str(json_str.as_str()).unwrap();
+            Box::into_raw(Box::new(key_obj.clone_payload())) as *mut u8
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qfhe_serialize_ciphertext_to_file(
+    ct_ptr: *const Ciphertext, // C의 void* 역할
+    level: SecurityLevel,
+    path_str: *const c_char,
+) -> i32 {
+    let path = unsafe { CStr::from_ptr(path_str).to_str().unwrap() };
+    let file = match File::create(path) {
+        Ok(f) => f,
+        Err(_) => return -1,
+    };
+    let writer = BufWriter::new(file);
+
+    let result = serde_json::to_writer(writer, &CipherObject {security_level: level, payload: (unsafe { &*ct_ptr }).clone()});
+
+    if result.is_ok() { 0 } else { -1 }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qfhe_deserialize_ciphertext_from_file(path_str: *const c_char) -> *mut Ciphertext {
+    let path = unsafe { CStr::from_ptr(path_str).to_str().unwrap() };
+    let json_str: String = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    let ct_obj: CipherObject = serde_json::from_str(json_str.as_str()).unwrap();
+    Box::into_raw(Box::new(ct_obj.payload))
 }

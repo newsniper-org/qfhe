@@ -1,4 +1,4 @@
-use crate::core::u256::U256;
+use crypto_bigint::{NonZero, U256};
 
 /// u128 정수를 RNS 표현으로 분해합니다.
 pub fn integer_to_rns(val: u128, rns_basis: &[u64]) -> Vec<u64> {
@@ -23,20 +23,19 @@ fn mod_inverse(a: i128, m: i128) -> Option<i128> {
 /// 중국인의 나머지 정리(CRT)를 사용하여 RNS 표현을 U256 정수로 재구성합니다.
 pub fn rns_to_integer(rns_val: &[u64], rns_basis: &[u64]) -> U256 {
     // Q = 기저의 모든 모듈러스의 곱
-    let q_product = rns_basis.iter().fold(U256::ONE, |acc, &m| acc.wrapping_mul(U256::from_u64(m)));
+    let q_product = rns_basis.iter().fold(U256::ONE, |acc, &m| acc.wrapping_mul(&U256::from_u64(m)));
     let mut result = U256::ZERO;
 
     for (&val, &modulus) in rns_val.iter().zip(rns_basis.iter()) {
-        let q_i = q_product / U256::from_u64(modulus); // Simplified division
+        let q_i = q_product.div_rem(&crypto_bigint::NonZero::new(U256::from_u64(modulus)).unwrap()).0; // div_rem 사용
         
-        let q_i_rem = (q_i % U256::from_u64(modulus)).low as i128;
+        let q_i_rem = q_i.rem(&NonZero::new(U256::from_u64(modulus)).unwrap()).to_words()[0] as i128; // to_words()로 u64 변환
         let q_i_inv = mod_inverse(q_i_rem, modulus as i128)
             .expect("Modular inverse must exist for CRT.");
 
-        let mut term = q_i.wrapping_mul(U256::from_u64(q_i_inv as u64));
-        term = term.wrapping_mul(U256::from_u64(val));
-        result = result.wrapping_add(term);
+        let mut term = q_i.wrapping_mul(&U256::from_u64(q_i_inv as u64));
+        term = term.wrapping_mul(&U256::from_u64(val));
+        result = result.wrapping_add(&term);
     }
-
-    result % q_product
+    result.rem(&crypto_bigint::NonZero::new(q_product).unwrap())
 }

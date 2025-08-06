@@ -53,7 +53,7 @@ pub struct MasterKey(pub [u8; 32]);
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Salt(pub [u8; 24]);
 
-pub fn generate_key_s<B : HardwareBackend<'static, 'static, 'static>>(
+pub fn generate_keys<B : HardwareBackend<'static, 'static, 'static>>(
     level: SecurityLevel,
     master_key: &MasterKey,
     salt: &Salt,
@@ -79,10 +79,30 @@ pub fn generate_key_s<B : HardwareBackend<'static, 'static, 'static>>(
     // 4. 결정론적 키 생성 (This part remains the same)
     let params = level.get_params();
     let sk = backend.generate_secret_key(&mut sampling_rng, &params);
+    
+    #[cfg(debug_assertions)]
+    println!("Secret key generated.");
+
     let pk = backend.generate_public_key(&sk, &mut sampling_rng, &params);
+
+    #[cfg(debug_assertions)]
+    println!("Public key generated.");
+
     let rlk = backend.generate_relinearization_key(&sk, &mut sampling_rng, &params);
+
+    #[cfg(debug_assertions)]
+    println!("Relinearization key generated.");
+
     let ksk = backend.generate_key_switching_key(&sk, &sk, &mut sampling_rng, &params);
+
+    #[cfg(debug_assertions)]
+    println!("Key-switching key generated.");
+    
     let bk = backend.generate_bootstrap_key(&sk, &mut sampling_rng, &params);
+
+    #[cfg(debug_assertions)]
+    println!("Bootstrap key generated.");
+    
 
     (sk, pk, ksk, rlk, bk)
 }

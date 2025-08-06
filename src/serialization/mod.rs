@@ -5,8 +5,9 @@ use crate::core::{SecretKey, keys::{BootstrapKey, KeySwitchingKey, Relinearizati
 
 use hexstring::{HexString, Case};
 
+#[repr(C)]
 pub enum KeyType {
-    Sk, Pk, Rlk, Bk, Ksk
+    SK, PK, RLK, BK, KSK
 }
 
 pub trait Key {
