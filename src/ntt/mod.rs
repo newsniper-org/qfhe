@@ -96,8 +96,8 @@ fn ntt_cooley_tukey_radix4(data: &mut [u64], n: usize, q: u64, w_primitive: u64,
             let chunk = &mut data[i..i+len];
             let mut w1: u64 = 1;
             for j in 0..(len / 4) {
-                let w2 = reducer.reduce(concat64x2(w1.widening_mul(w1)));
-                let w3 = reducer.reduce(concat64x2(w1.widening_mul(w2)));
+                let w2 = reducer.reduce((w1 as u128) * (w1 as u128));
+                let w3 = reducer.reduce((w1 as u128) * (w2 as u128));
 
                 let idx0 = j;
                 let idx1 = idx0 + len / 4;
@@ -105,9 +105,9 @@ fn ntt_cooley_tukey_radix4(data: &mut [u64], n: usize, q: u64, w_primitive: u64,
                 let idx3 = idx2 + len / 4;
 
                 let u0 = chunk[idx0];
-                let u1 = reducer.reduce(concat64x2(chunk[idx1].widening_mul(w1)));
-                let u2 = reducer.reduce(concat64x2(chunk[idx2].widening_mul(w2)));
-                let u3 = reducer.reduce(concat64x2(chunk[idx3].widening_mul(w3)));
+                let u1 = reducer.reduce((chunk[idx1] as u128) * (w1 as u128));
+                let u2 = reducer.reduce((chunk[idx2] as u128) * (w2 as u128));
+                let u3 = reducer.reduce((chunk[idx3] as u128) * (w3 as u128));
 
                 // --- ❗❗❗ 핵심 버그 수정: 안전한 모듈러 연산으로 최종 변경 ❗❗❗ ---
                 let t0 = u0.safe_add_mod(u2, q);

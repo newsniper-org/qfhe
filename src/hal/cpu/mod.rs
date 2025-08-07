@@ -74,12 +74,21 @@ fn sample_gaussian_poly(n: usize, rns_size: usize, std_dev: f64, rng: &mut ChaCh
 fn sample_ternary_poly(n: usize, rns_size: usize, q_moduli: &[u64], rng: &mut ChaCha20Rng) -> Polynomial {
     let mut poly = Polynomial::zero(n, rns_size);
     for i in 0..n {
-        let val = (rng.next_u32() % 3) as i128 - 1;
+        let val = (rng.next_u32() % 3) as i128 - 1; // -1, 0, 1 생성
         if val != 0 {
-             poly.coeffs[i].w = crate::core::rns::integer_to_rns(val.abs() as u128, q_moduli);
-             if val < 0 {
-                // 음수 처리
-             }
+            // val.abs()는 항상 1
+            let rns_one = crate::core::rns::integer_to_rns(1, q_moduli);
+            
+            if val < 0 {
+                // ✅ FIX: -1을 올바르게 처리 (q - 1)
+                for j in 0..rns_size {
+                    poly.coeffs[i].w[j] = q_moduli[j] - rns_one[j];
+                    // 참고: 쿼터니언의 다른 성분(x, y, z)은 0으로 유지
+                }
+            } else {
+                // val이 1인 경우
+                poly.coeffs[i].w = rns_one;
+            }
         }
     }
     poly
@@ -468,6 +477,7 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
     }
 
     /// 두 암호문을 곱합니다. [재선형화 포함]
+    /// 두 암호문을 곱합니다. [재선형화 포함]
     fn homomorphic_mul(&self, ct1: &Ciphertext, ct2: &Ciphertext, rlk: &RelinearizationKey, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext {
         assert_eq!(ct1.modulus_level, ct2.modulus_level, "Ciphertexts must have the same modulus level for multiplication.");
         
@@ -477,16 +487,13 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
         let levels = params.gadget_levels_l;
 
         // 1. 텐서 곱 계산 (ct_res = ct1 ⊗ ct2)
-        // c0 = b1*b2
         let c0 = self.polynomial_mul(&ct1.b, &ct2.b, params);
-        // c1_i = a1_i*b2 + b1*a2_i
         let mut c1 = Vec::with_capacity(k);
         for i in 0..k {
             let a1i_b2 = self.polynomial_mul(&ct1.a_vec[i], &ct2.b, params);
             let b1_a2i = self.polynomial_mul(&ct1.b, &ct2.a_vec[i], params);
             c1.push(self.polynomial_add(&a1i_b2, &b1_a2i, params));
         }
-        // c2_ij = a1_i*a2_j
         let mut c2 = vec![vec![Polynomial::zero(n, rns_basis_size); k]; k];
         for i in 0..k {
             for j in 0..k {
@@ -495,7 +502,6 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
         }
 
         // 2. 재선형화(Relinearization)
-        // c2항(s^2을 포함)을 s에 대한 암호문으로 변환
         let mut c2_prime = Ciphertext {
             a_vec: vec![Polynomial::zero(n, rns_basis_size); k],
             b: Polynomial::zero(n, rns_basis_size),
@@ -504,16 +510,20 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
         
         for i in 0..k {
             for j in 0..k {
-                // c2_ij를 가젯 분해
                 let decomposed_c2_poly = gadget_decompose(&c2[i][j], params);
                 for l in 0..levels {
                     let rlk_index = (i * k + j) * levels + l;
                     let rlk_ct = &rlk.0[rlk_index];
-                    
-                    // 재선형화 키와 분해된 다항식을 곱하여 합산
-                    c2_prime.b = self.polynomial_add(&c2_prime.b, &self.polynomial_mul(&rlk_ct.b, &decomposed_c2_poly[l], params), params);
+                    let decomp_poly = &decomposed_c2_poly[l];
+
+                    // --- ✅ FIX: 새로 만든 헬퍼 함수로 재선형화 로직 수정 ---
+                    // term = rlk_ct * decomp_poly
+                    let term = self.ciphertext_scalar_mul(rlk_ct, decomp_poly, params);
+
+                    // c2_prime += term
+                    c2_prime.b = self.polynomial_add(&c2_prime.b, &term.b, params);
                     for m in 0..k {
-                        c2_prime.a_vec[m] = self.polynomial_add(&c2_prime.a_vec[m], &self.polynomial_mul(&rlk_ct.a_vec[m], &decomposed_c2_poly[l], params), params);
+                        c2_prime.a_vec[m] = self.polynomial_add(&c2_prime.a_vec[m], &term.a_vec[m], params);
                     }
                 }
             }
@@ -738,6 +748,30 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
             a_vec: ct.a_vec.iter().map(convert_poly).collect(),
             b: convert_poly(&ct.b),
             modulus_level: ct.modulus_level + 1,
+        }
+    }
+
+    /// ✅ NEW: 암호문-스칼라 곱셈 헬퍼 함수 구현
+    fn ciphertext_scalar_mul(
+        &self,
+        ct: &Ciphertext,
+        scalar: &Polynomial,
+        params: &QfheParameters<'a, 'b, 'c>,
+    ) -> Ciphertext {
+        let k = params.module_dimension_k;
+        
+        // b' = b * scalar
+        let new_b = self.polynomial_mul(&ct.b, scalar, params);
+
+        // a_i' = a_i * scalar
+        let new_a_vec = ct.a_vec.iter()
+            .map(|a_i| self.polynomial_mul(a_i, scalar, params))
+            .collect();
+        
+        Ciphertext {
+            a_vec: new_a_vec,
+            b: new_b,
+            modulus_level: ct.modulus_level,
         }
     }
 }

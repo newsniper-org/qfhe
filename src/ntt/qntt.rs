@@ -82,42 +82,42 @@ pub fn qntt_pointwise_mul(p1: &mut Polynomial, p2: &Polynomial, params: &QfhePar
 
             // --- ❗❗❗ 핵심 버그 수정: 모든 연산을 안전한 모듈러 연산으로 교체 ❗❗❗ ---
             // term1 = c1a * c1b
-            let t1_w_a = reducer.reduce(concat64x2(c1a_w.widening_mul(c1b_w)));
-            let t1_w_b = reducer.reduce(concat64x2(c1a_x.widening_mul(c1b_x)));
+            let t1_w_a = reducer.reduce((c1a_w as u128) * (c1b_w as u128));
+            let t1_w_b = reducer.reduce((c1a_x as u128) * (c1b_x as u128));
             let term1_w = t1_w_a.safe_sub_mod(t1_w_b, q);
             
-            let t1_x_a = reducer.reduce(concat64x2(c1a_w.widening_mul(c1b_x)));
-            let t1_x_b = reducer.reduce(concat64x2(c1a_x.widening_mul(c1b_w)));
+            let t1_x_a = reducer.reduce((c1a_w as u128) * (c1b_x as u128));
+            let t1_x_b = reducer.reduce((c1a_x as u128) * (c1b_w as u128));
             let term1_x = t1_x_a.safe_add_mod(t1_x_b, q);
 
             // term2 = c2a * c2b_conj
-            let t2_w_a = reducer.reduce(concat64x2(c2a_w.widening_mul(c2b_w)));
-            let t2_w_b = reducer.reduce(concat64x2(c2a_x.widening_mul(c2b_conj_x)));
+            let t2_w_a = reducer.reduce((c2a_w as u128) * (c2b_w as u128));
+            let t2_w_b = reducer.reduce((c2a_x as u128) * (c2b_conj_x as u128));
             let term2_w = t2_w_a.safe_sub_mod(t2_w_b, q);
             
-            let t2_x_a = reducer.reduce(concat64x2(c2a_w.widening_mul(c2b_conj_x)));
-            let t2_x_b = reducer.reduce(concat64x2(c2a_x.widening_mul(c2b_w)));
+            let t2_x_a = reducer.reduce((c2a_w as u128) * (c2b_conj_x as u128));
+            let t2_x_b = reducer.reduce((c2a_x as u128) * (c2b_w as u128));
             let term2_x = t2_x_a.safe_add_mod(t2_x_b, q);
 
             let res_c1_w = term1_w.safe_sub_mod(term2_w, q);
             let res_c1_x = term1_x.safe_sub_mod(term2_x, q);
             
             // term3 = c1a * c2b
-            let t3_w_a = reducer.reduce(concat64x2(c1a_w.widening_mul(c2b_w)));
-            let t3_w_b = reducer.reduce(concat64x2(c1a_x.widening_mul(c2b_x)));
+            let t3_w_a = reducer.reduce((c1a_w as u128) * (c2b_w as u128));
+            let t3_w_b = reducer.reduce((c1a_x as u128) * (c2b_x as u128));
             let term3_w = t3_w_a.safe_sub_mod(t3_w_b, q);
 
-            let t3_x_a = reducer.reduce(concat64x2(c1a_w.widening_mul(c2b_x)));
-            let t3_x_b = reducer.reduce(concat64x2(c1a_x.widening_mul(c2b_w)));
+            let t3_x_a = reducer.reduce((c1a_w as u128) * (c2b_x as u128));
+            let t3_x_b = reducer.reduce((c1a_x as u128) * (c2b_w as u128));
             let term3_x = t3_x_a.safe_add_mod(t3_x_b, q);
 
             // term4 = c2a * c1b_conj
-            let t4_w_a = reducer.reduce(concat64x2(c2a_w.widening_mul(c1b_w)));
-            let t4_w_b = reducer.reduce(concat64x2(c2a_x.widening_mul(c1b_conj_x)));
+            let t4_w_a = reducer.reduce((c2a_w as u128) * (c1b_w as u128));
+            let t4_w_b = reducer.reduce((c2a_x as u128) * (c1b_conj_x as u128));
             let term4_w = t4_w_a.safe_sub_mod(t4_w_b, q);
 
-            let t4_x_a = reducer.reduce(concat64x2(c2a_w.widening_mul(c1b_conj_x)));
-            let t4_x_b = reducer.reduce(concat64x2(c2a_x.widening_mul(c1b_w)));
+            let t4_x_a = reducer.reduce((c2a_w as u128) * (c1b_conj_x as u128));
+            let t4_x_b = reducer.reduce((c2a_x as u128) * (c1b_w as u128));
             let term4_x = t4_x_a.safe_add_mod(t4_x_b, q);
 
             let res_c2_w = term3_w.safe_add_mod(term4_w, q);

@@ -29,7 +29,8 @@ pub trait HardwareBackend<'a, 'b, 'c> {
     fn keyswitch(&self, ct: &Ciphertext, ksk: &KeySwitchingKey, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext;
     fn modulus_switch(&self, ct: &Ciphertext, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext;
 
-
+    /// ✅ NEW: 암호문과 일반 다항식(스칼라)의 곱셈을 위한 헬퍼 함수
+    fn ciphertext_scalar_mul(&self, ct: &Ciphertext, scalar: &Polynomial, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext;
 }
 
 pub mod cpu;
