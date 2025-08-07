@@ -11,16 +11,6 @@ pub enum KeyType {
     SK, PK, RLK, BK, EVK
 }
 
-pub trait Key {
-}
-
-impl Key for SecretKey {}
-impl Key for RelinearizationKey {}
-impl Key for EvaluationKey {}
-impl Key for BootstrapKey {}
-
-impl Key for PublicKey {}
-
 
 impl Serialize for SecurityLevel {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -70,53 +60,7 @@ impl<'de> Deserialize<'de> for SecurityLevel {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct KeyObject<K : Key> {
-    security_level: SecurityLevel,
-    payload: K
-}
-
-impl<'de, K: Key + Serialize + Deserialize<'de> + Clone> KeyObject<K> {
-    pub fn new(payload: K, security_level: SecurityLevel) -> Self {
-        Self {
-            security_level,
-            payload: payload.clone()
-        }
-    }
-}
-
-
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct CipherObject {
     pub security_level: SecurityLevel,
     pub payload: Ciphertext
-}
-
-
-pub trait Capsule<P : Clone + Serialize + for<'de> Deserialize<'de>> {
-    fn get_security_level(&self) -> SecurityLevel;
-
-    fn clone_payload(&self) -> P;
-}
-
-impl Capsule<Ciphertext> for CipherObject {
-    fn get_security_level(&self) -> SecurityLevel {
-        self.security_level
-    }
-
-    fn clone_payload(&self) -> Ciphertext {
-        self.payload.clone()
-    }
-}
-
-impl<K> Capsule<K> for KeyObject<K>
-where K: Key + Serialize + for<'de> Deserialize<'de> + Clone {
-    fn clone_payload(&self) -> K {
-        self.payload.clone()
-    }
-    
-    fn get_security_level(&self) -> SecurityLevel {
-        self.security_level
-    }
-    
 }

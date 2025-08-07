@@ -13,7 +13,7 @@ pub use crate::core::{
 };
 pub use crate::hal::{HardwareBackend, cpu::CpuBackend};
 pub use crate::ffi::{EvaluationContext, EncryptionContext, DecryptionContext};
-pub use crate::serialization::{CipherObject, KeyObject, Key, KeyType};
+pub use crate::serialization::{CipherObject, KeyType};
 
 // ✅ RLWE: 테스트 모듈 전체를 새로운 API에 맞게 재작성
 #[cfg(test)]

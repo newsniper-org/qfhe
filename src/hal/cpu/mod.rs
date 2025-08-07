@@ -211,12 +211,12 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
     fn generate_secret_key(&self, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>) -> SecretKey {
         let s1 = Self::sample_ternary_poly(params.polynomial_degree, params.modulus_q.len(), params.modulus_q, rng);
         let s2 = Self::sample_ternary_poly(params.polynomial_degree, params.modulus_q.len(), params.modulus_q, rng);
-        SecretKey(s1, s2)
+        SecretKey { s1, s2 }
     }
 
     /// ✅ RLWE: 공개키 (b, a) 생성. b = -a*s1 + e
     fn generate_public_key(&self, sk: &SecretKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>) -> PublicKey {
-        let s1 = &sk.0;
+        let s1 = &sk.s1;
         let n = params.polynomial_degree;
         let rns_size = params.modulus_q.len();
 
@@ -256,7 +256,7 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
 
     /// ✅ RLWE: 복호화. m' = c0 + c1*s1
     fn decrypt(&self, ciphertext: &Ciphertext, sk: &SecretKey, params: &QfheParameters<'a, 'b, 'c>) -> u64 {
-        let s1 = &sk.0;
+        let s1 = &sk.s1;
         
         // noisy_poly = c0 + c1*s1
         let c1_s1 = self.polynomial_mul(&ciphertext.c1, s1, params);
@@ -378,7 +378,7 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
     
     /// ✅ RLWE: 재선형화 키 생성 구현. RLK = Enc(g^l * s1^2)
     fn generate_relinearization_key(&self, sk: &SecretKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>) -> RelinearizationKey {
-        let s1 = &sk.0;
+        let s1 = &sk.s1;
         let n = params.polynomial_degree;
         let rns_size = params.modulus_q.len();
         let levels = params.gadget_levels_l;
@@ -437,7 +437,7 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
 
     /// ✅ RLWE: 부트스트래핑 키 생성 구현. BSK = { GGSW(s1_i) }
     fn generate_bootstrap_key(&self, sk: &SecretKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>) -> BootstrapKey {
-        let s1 = &sk.0;
+        let s1 = &sk.s1;
         let n = params.polynomial_degree;
         let rns_size = params.modulus_q.len();
         let pk = self.generate_public_key(sk, rng, params);

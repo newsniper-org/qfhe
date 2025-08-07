@@ -14,7 +14,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use rand_core::OsRng;
 use serde::Deserialize;
-use crate::serialization::{KeyObject, CipherObject, Capsule, KeyType, Key};
+use crate::serialization::{CipherObject, KeyType};
 use serde::{Serialize, de::DeserializeOwned};
 
 // --- Context Structs ---
@@ -190,11 +190,11 @@ pub unsafe extern "C" fn qfhe_serialize_key_to_file(
     let writer = BufWriter::new(file);
 
     let result = match key_type {
-        KeyType::SK => serde_json::to_writer(writer, &KeyObject::new(unsafe { &*(key_ptr as *const SecretKey) }.clone(), level)),
-        KeyType::PK => serde_json::to_writer(writer, &KeyObject::new(unsafe { &*(key_ptr as *const PublicKey) }.clone(), level)),
-        KeyType::RLK => serde_json::to_writer(writer, &KeyObject::new(unsafe { &*(key_ptr as *const RelinearizationKey) }.clone(), level)),
-        KeyType::BK => serde_json::to_writer(writer, &KeyObject::new(unsafe { &*(key_ptr as *const BootstrapKey) }.clone(), level)),
-        KeyType::EVK => serde_json::to_writer(writer, &KeyObject::new(unsafe { &*(key_ptr as *const EvaluationKey) }.clone(), level)),
+        KeyType::SK => serde_json::to_writer(writer, unsafe { &*(key_ptr as *const SecretKey) }),
+        KeyType::PK => serde_json::to_writer(writer, unsafe { &*(key_ptr as *const PublicKey) }),
+        KeyType::RLK => serde_json::to_writer(writer, unsafe { &*(key_ptr as *const RelinearizationKey) }),
+        KeyType::BK => serde_json::to_writer(writer, unsafe { &*(key_ptr as *const BootstrapKey) }),
+        KeyType::EVK => serde_json::to_writer(writer, unsafe { &*(key_ptr as *const EvaluationKey) }),
     };
 
     if result.is_ok() { 0 } else { -1 }
@@ -213,24 +213,24 @@ pub unsafe extern "C" fn qfhe_deserialize_key_from_file(
 
     match key_type {
         KeyType::SK => {
-            let key_obj: KeyObject<SecretKey> = serde_json::from_str(json_str.as_str()).unwrap();
-            Box::into_raw(Box::new(key_obj.clone_payload())) as *mut u8
+            let key_obj: SecretKey = serde_json::from_str(json_str.as_str()).unwrap();
+            Box::into_raw(Box::new(key_obj)) as *mut u8
         },
         KeyType::PK => {
-            let key_obj: KeyObject<PublicKey> = serde_json::from_str(json_str.as_str()).unwrap();
-            Box::into_raw(Box::new(key_obj.clone_payload())) as *mut u8
+            let key_obj: PublicKey = serde_json::from_str(json_str.as_str()).unwrap();
+            Box::into_raw(Box::new(key_obj)) as *mut u8
         },
         KeyType::RLK => {
-            let key_obj: KeyObject<RelinearizationKey> = serde_json::from_str(json_str.as_str()).unwrap();
-            Box::into_raw(Box::new(key_obj.clone_payload())) as *mut u8
+            let key_obj: RelinearizationKey = serde_json::from_str(json_str.as_str()).unwrap();
+            Box::into_raw(Box::new(key_obj)) as *mut u8
         },
         KeyType::BK => {
-            let key_obj: KeyObject<BootstrapKey> = serde_json::from_str(json_str.as_str()).unwrap();
-            Box::into_raw(Box::new(key_obj.clone_payload())) as *mut u8
+            let key_obj: BootstrapKey = serde_json::from_str(json_str.as_str()).unwrap();
+            Box::into_raw(Box::new(key_obj)) as *mut u8
         },
         KeyType::EVK => {
-            let key_obj: KeyObject<EvaluationKey> = serde_json::from_str(json_str.as_str()).unwrap();
-            Box::into_raw(Box::new(key_obj.clone_payload())) as *mut u8
+            let key_obj: EvaluationKey = serde_json::from_str(json_str.as_str()).unwrap();
+            Box::into_raw(Box::new(key_obj)) as *mut u8
         }
     }
 }

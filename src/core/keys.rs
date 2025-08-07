@@ -20,7 +20,10 @@ pub struct RelinearizationKey(pub Vec<Ciphertext>); // 내부 구조는 동형�
 /// ✅ RLWE: 비밀키는 두 개의 다항식 (s1, s2)로 구성됩니다.
 /// s1은 암/복호화에, s2는 동형 오토모피즘에 사용됩니다.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SecretKey(pub Polynomial, pub Polynomial);
+pub struct SecretKey {
+    pub s1: Polynomial,
+    pub s2: Polynomial
+}
 
 /// 키 스위칭(Key Switching) 및 오토모피즘을 위한 평가 키입니다.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -77,7 +80,7 @@ pub fn generate_keys<B : HardwareBackend<'static, 'static, 'static>>(
     let rlk = backend.generate_relinearization_key(&sk, &mut sampling_rng, &params);
     
     // 동형 켤레를 위한 평가 키 생성 (s1_conj -> s1)
-    let mut s1_conj = sk.0.clone();
+    let mut s1_conj = sk.s1.clone();
     for i in 0..params.polynomial_degree {
         for j in 0..params.modulus_q.len() {
             let q_j = params.modulus_q[j];
