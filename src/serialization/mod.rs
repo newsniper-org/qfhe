@@ -1,13 +1,14 @@
 use core::error;
+use std::{ffi::{c_char, CStr}, fs::File, io::{BufWriter, Read}, str::FromStr};
 use serde::{Serialize, Deserialize};
 
-use crate::core::{SecretKey, keys::{BootstrapKey, KeySwitchingKey, RelinearizationKey, PublicKey}, Ciphertext, GgswCiphertext, Polynomial, Quaternion, SecurityLevel};
+use crate::{core::{keys::{BootstrapKey, PublicKey, RelinearizationKey}, Ciphertext, GgswCiphertext, Polynomial, Quaternion, keys::SecretKey, SecurityLevel}, EvaluationKey};
 
 use hexstring::{HexString, Case};
 
 #[repr(C)]
 pub enum KeyType {
-    SK, PK, RLK, BK, KSK
+    SK, PK, RLK, BK, EVK
 }
 
 pub trait Key {
@@ -15,7 +16,7 @@ pub trait Key {
 
 impl Key for SecretKey {}
 impl Key for RelinearizationKey {}
-impl Key for KeySwitchingKey {}
+impl Key for EvaluationKey {}
 impl Key for BootstrapKey {}
 
 impl Key for PublicKey {}
@@ -81,10 +82,6 @@ impl<'de, K: Key + Serialize + Deserialize<'de> + Clone> KeyObject<K> {
             payload: payload.clone()
         }
     }
-
-    pub fn clone_payload(&self) -> K {
-        self.payload.clone()
-    }
 }
 
 
@@ -93,4 +90,33 @@ impl<'de, K: Key + Serialize + Deserialize<'de> + Clone> KeyObject<K> {
 pub struct CipherObject {
     pub security_level: SecurityLevel,
     pub payload: Ciphertext
+}
+
+
+pub trait Capsule<P : Clone + Serialize + for<'de> Deserialize<'de>> {
+    fn get_security_level(&self) -> SecurityLevel;
+
+    fn clone_payload(&self) -> P;
+}
+
+impl Capsule<Ciphertext> for CipherObject {
+    fn get_security_level(&self) -> SecurityLevel {
+        self.security_level
+    }
+
+    fn clone_payload(&self) -> Ciphertext {
+        self.payload.clone()
+    }
+}
+
+impl<K> Capsule<K> for KeyObject<K>
+where K: Key + Serialize + for<'de> Deserialize<'de> + Clone {
+    fn clone_payload(&self) -> K {
+        self.payload.clone()
+    }
+    
+    fn get_security_level(&self) -> SecurityLevel {
+        self.security_level
+    }
+    
 }

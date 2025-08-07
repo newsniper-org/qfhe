@@ -25,7 +25,7 @@ endif
 
 # C source and executable
 C_PATH := /usr/lib/gcc/x86_64-redhat-linux/15/include/
-C_DEMOS := 01_generate_keys 02_encrypt 03_decrypt 04_add 05_sub 06_mul
+C_DEMOS := 01_generate_keys 02_encrypt 03_decrypt 04_add 05_mul 06_bootstrap
 C_EXECUTABLES := $(C_DEMOS)
 
 # Python 3 executable
@@ -87,13 +87,8 @@ run-04:
 	@echo "--- End of Demo ---"
 
 run-05:
-	@echo "\n--- Running Demo: 100 - 42 ---"
-	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/release/05_sub ./bin/release/05_sub demo_output/ct_100.ct demo_output/ct_42.ct demo_output/ct_100_sub_42.ct
-	@echo "--- End of Demo ---"
-
-run-06:
 	@echo "\n--- Running Demo: 100 * 42 ---"
-	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/release/06_mul ./bin/release/06_mul demo_output/ct_100.ct demo_output/ct_42.ct demo_output/ct_100_mul_42.ct
+	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/release/06_mul ./bin/release/05_mul demo_output/ct_100.ct demo_output/ct_42.ct demo_output/ct_100_mul_42.ct
 	@echo "--- End of Demo ---"
 
 

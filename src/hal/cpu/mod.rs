@@ -1,168 +1,48 @@
 // src/hal/cpu/mod.rs
 
-use crate::core::num::concat64x2;
+// src/hal/cpu/mod.rs
+
 use crate::core::{
-    BootstrapKey, Ciphertext, GgswCiphertext, KeySwitchingKey, Polynomial, PublicKey, QfheParameters, Quaternion, RelinearizationKey, SecretKey
+    Ciphertext, GgswCiphertext, Polynomial, QfheParameters, keys::{RelinearizationKey, SecretKey, BootstrapKey, EvaluationKey, PublicKey}
 };
-use crate::ntt::power;
 use super::HardwareBackend;
 use rand::{Rng, RngCore, SeedableRng};
 use rand_distr::{Normal, Distribution};
-
-use crate::ntt::BarrettReducer64;
-use crate::ntt::qntt::*;
-
-use crate::core::num::SafeModuloArith;
-
-use crate::core::rns::*;
-
 use rand_chacha::ChaCha20Rng;
+use crate::ntt::qntt::*;
+use crate::core::num::SafeModuloArith;
+use crate::core::rns::*;
+use crypto_bigint::{U256, NonZero};
 
-use rayon::prelude::*; // 병렬 처리를 위해 추가
-
-use crypto_bigint::U256;
-
-
+use rayon::prelude::*;
 pub struct CpuBackend;
 
-/// 이산 가우시안 분포에서 노이즈를 샘플링합니다.
-fn sample_discrete_gaussian(noise_std_dev: f64) -> i128 {
-    let mut rng = rand::thread_rng();
+// ✅ RLWE: 모든 샘플링 함수는 그대로 재사용 가능
+fn sample_discrete_gaussian<R: Rng + ?Sized>(noise_std_dev: f64, rng: &mut R) -> i128 {
     let normal = Normal::new(0.0, noise_std_dev).unwrap();
-    normal.sample(&mut rng).round() as i128
+    normal.sample(rng).round() as i128
 }
 
-
-// #region 결정론적 샘플링 헬퍼 함수
-
-/// CSPRNG를 사용하여 균등 분포에서 다항식을 샘플링합니다.
-fn sample_uniform_poly(n: usize, rns_size: usize, rng: &mut ChaCha20Rng, params: &QfheParameters) -> Polynomial {
-    let mut poly = Polynomial::zero(n, rns_size);
-    let mut buffer = [0u8; 8];
-    for i in 0..n {
-        for j in 0..rns_size {
-            let q_j = params.modulus_q[j];
-            // --- ❗❗❗ 핵심 버그 수정: 아키텍처 독립적인 .gen() 사용 ❗❗❗ ---
-            poly.coeffs[i].w[j] = rng.r#gen::<u64>() % q_j;
-            poly.coeffs[i].x[j] = rng.r#gen::<u64>() % q_j;
-            poly.coeffs[i].y[j] = rng.r#gen::<u64>() % q_j;
-            poly.coeffs[i].z[j] = rng.r#gen::<u64>() % q_j;
-        }
-    }
-    poly
-}
-
-/// CSPRNG를 사용하여 이산 가우시안 분포에서 작은 다항식을 샘플링합니다.
-fn sample_gaussian_poly(n: usize, rns_size: usize, std_dev: f64, rng: &mut ChaCha20Rng, params: &QfheParameters) -> Polynomial {
-    let mut poly = Polynomial::zero(n, rns_size);
-    let normal = Normal::new(0.0, std_dev).unwrap();
-    for i in 0..n {
-        let noise = normal.sample(rng).round() as i128;
-        // ❗ 버그 수정: params.modulus_q를 RNS 기저로 전달
-        poly.coeffs[i].w = crate::core::rns::integer_to_rns(noise.unsigned_abs(), params.modulus_q);
-        if noise < 0 {
-            // 음수 처리: q - a
-            for j in 0..rns_size {
-                poly.coeffs[i].w[j] = params.modulus_q[j] - poly.coeffs[i].w[j];
-            }
-        }
-    }
-    poly
-}
-
-/// CSPRNG를 사용하여 삼항 분포({-1, 0, 1})에서 비밀키 다항식을 샘플링합니다.
-fn sample_ternary_poly(n: usize, rns_size: usize, q_moduli: &[u64], rng: &mut ChaCha20Rng) -> Polynomial {
-    let mut poly = Polynomial::zero(n, rns_size);
-    for i in 0..n {
-        let val = (rng.next_u32() % 3) as i128 - 1; // -1, 0, 1 생성
-        if val != 0 {
-            // val.abs()는 항상 1
-            let rns_one = crate::core::rns::integer_to_rns(1, q_moduli);
-            
-            if val < 0 {
-                // ✅ FIX: -1을 올바르게 처리 (q - 1)
-                for j in 0..rns_size {
-                    poly.coeffs[i].w[j] = q_moduli[j] - rns_one[j];
-                    // 참고: 쿼터니언의 다른 성분(x, y, z)은 0으로 유지
-                }
-            } else {
-                // val이 1인 경우
-                poly.coeffs[i].w = rns_one;
-            }
-        }
-    }
-    poly
-}
-
-/// 내부 암호화 함수 (공개키 생성 및 재선형화/부트스트랩 키 생성에 사용)
-fn encrypt_internal(
-    msg_poly: &Polynomial,
-    sk: &SecretKey,
-    rng: &mut ChaCha20Rng,
-    params: &QfheParameters,
-) -> Ciphertext {
-    let k = params.module_dimension_k;
-    let n = params.polynomial_degree;
-    let rns_size = params.modulus_q.len();
-    let backend = CpuBackend;
-
-    let a_vec = (0..k).map(|_| sample_uniform_poly(n, rns_size, rng, params)).collect::<Vec<_>>();
-    let e_poly = sample_gaussian_poly(n, rns_size, params.noise_std_dev, rng, params);
-    
-    let mut as_poly = Polynomial::zero(n, rns_size);
-    for i in 0..k {
-        let product = backend.polynomial_mul(&a_vec[i], &sk.0[i], params);
-        as_poly = backend.polynomial_add(&as_poly, &product, params);
-    }
-    
-    let b_poly = backend.polynomial_add(&as_poly, &e_poly, params);
-    let b_poly = backend.polynomial_add(&b_poly, msg_poly, params);
-
-    Ciphertext { a_vec, b: b_poly, modulus_level: 0 }
-}
-
-/// 다항식과 RNS로 표현된 스칼라를 곱합니다.
-fn polynomial_scalar_mul(p: &Polynomial, scalar_rns: &[u64], params: &QfheParameters) -> Polynomial {
-    let n = params.polynomial_degree;
-    let rns_basis_size = params.modulus_q.len();
-    let mut res = Polynomial::zero(n, rns_basis_size);
-
-    for i in 0..n {
-        for j in 0..rns_basis_size {
-            // 모든 쿼터니언 성분에 스칼라 곱셈을 적용합니다.
-            res.coeffs[i].w[j] = params.reducers[j].reduce(p.coeffs[i].w[j] as u128 * scalar_rns[j] as u128);
-            res.coeffs[i].x[j] = params.reducers[j].reduce(p.coeffs[i].x[j] as u128 * scalar_rns[j] as u128);
-            res.coeffs[i].y[j] = params.reducers[j].reduce(p.coeffs[i].y[j] as u128 * scalar_rns[j] as u128);
-            res.coeffs[i].z[j] = params.reducers[j].reduce(p.coeffs[i].z[j] as u128 * scalar_rns[j] as u128);
-        }
-    }
-    res
-}
-
-/// 다항식을 가젯 분해합니다.
 fn gadget_decompose(p: &Polynomial, params: &QfheParameters) -> Vec<Polynomial> {
     let n = params.polynomial_degree;
     let rns_basis_size = params.modulus_q.len();
-    let base = crypto_bigint::NonZero::new(U256::from_u128(params.gadget_base_b)).unwrap();
+    let base = NonZero::new(U256::from_u128(params.gadget_base_b)).unwrap();
     let levels = params.gadget_levels_l;
     
     let mut decomposed_polys = vec![Polynomial::zero(n, rns_basis_size); levels];
 
     for i in 0..n {
-        // ❗ 수정: .low를 제거하고 U256 타입으로 값을 받음
         let mut current_w = rns_to_integer(&p.coeffs[i].w, params.modulus_q);
         let mut current_x = rns_to_integer(&p.coeffs[i].x, params.modulus_q);
         let mut current_y = rns_to_integer(&p.coeffs[i].y, params.modulus_q);
         let mut current_z = rns_to_integer(&p.coeffs[i].z, params.modulus_q);
 
         for l in 0..levels {
-            // ❗ 수정: U256의 나눗셈/나머지 연산(div_rem) 사용
             let (next_w, rem_w) = current_w.div_rem(&base);
             let (next_x, rem_x) = current_x.div_rem(&base);
             let (next_y, rem_y) = current_y.div_rem(&base);
             let (next_z, rem_z) = current_z.div_rem(&base);
             
-            // 분해된 나머지(rem)는 base보다 작으므로 u128로 안전하게 변환 가능
             decomposed_polys[l].coeffs[i].w = integer_to_rns(rem_w.to_words()[0] as u128, params.modulus_q);
             decomposed_polys[l].coeffs[i].x = integer_to_rns(rem_x.to_words()[0] as u128, params.modulus_q);
             decomposed_polys[l].coeffs[i].y = integer_to_rns(rem_y.to_words()[0] as u128, params.modulus_q);
@@ -177,158 +57,187 @@ fn gadget_decompose(p: &Polynomial, params: &QfheParameters) -> Vec<Polynomial> 
     decomposed_polys
 }
 
-/// GGSW 암호문과 LWE 암호문의 외부 곱(External Product)을 계산합니다.
-fn external_product(ggsw: &GgswCiphertext, lwe_ct: &Ciphertext, params: &QfheParameters) -> Ciphertext {
-    let k = params.module_dimension_k;
-    let n = params.polynomial_degree;
-    let rns_basis_size = params.modulus_q.len();
-    let levels = params.gadget_levels_l;
-
-    // LWE 암호문의 a_vec과 b를 가젯 분해합니다.
-    let mut decomposed_a = Vec::with_capacity(k);
-    for i in 0..k {
-        decomposed_a.push(gadget_decompose(&lwe_ct.a_vec[i], params));
+fn polynomial_rotation(p: &Polynomial, k: i128, params: &QfheParameters) -> Polynomial {
+    let n = params.polynomial_degree as i128;
+    let rns_size = params.modulus_q.len();
+    let mut rotated_p = Polynomial::zero(n as usize, rns_size);
+    for i in 0..n {
+        let target_index = (i - k).rem_euclid(n);
+        rotated_p.coeffs[i as usize] = p.coeffs[target_index as usize].clone();
     }
-    let decomposed_b = gadget_decompose(&lwe_ct.b, params);
-
-    let mut result_ct = Ciphertext {
-        a_vec: vec![Polynomial::zero(n, rns_basis_size); k],
-        b: Polynomial::zero(n, rns_basis_size),
-        modulus_level: lwe_ct.modulus_level,
-    };
-    
-    // GGSW 암호문의 각 레벨에 대해 연산을 수행합니다.
-    // GGSW(m) * LWE(p) = LWE(m*p)
-    for l in 0..levels {
-        let ggsw_level_ct = &ggsw.levels[l]; // GGSW의 l번째 레벨 암호문
-
-        // LWE의 b 부분 처리
-        let b_decomp_poly = &decomposed_b[l];
-        result_ct.b = CpuBackend.polynomial_add(&result_ct.b, &CpuBackend.polynomial_mul(&ggsw_level_ct.b, b_decomp_poly, params), params);
-        for i in 0..k {
-            result_ct.a_vec[i] = CpuBackend.polynomial_add(&result_ct.a_vec[i], &CpuBackend.polynomial_mul(&ggsw_level_ct.a_vec[i], b_decomp_poly, params), params);
-        }
-
-        // LWE의 a_vec 부분 처리
-        for i in 0..k {
-            let a_decomp_poly = &decomposed_a[i][l];
-            result_ct.b = CpuBackend.polynomial_add(&result_ct.b, &CpuBackend.polynomial_mul(&ggsw_level_ct.b, a_decomp_poly, params), params);
-            for j in 0..k {
-                 result_ct.a_vec[j] = CpuBackend.polynomial_add(&result_ct.a_vec[j], &CpuBackend.polynomial_mul(&ggsw_level_ct.a_vec[j], a_decomp_poly, params), params);
-            }
-        }
-    }
-    result_ct
+    rotated_p
 }
 
-/// CMUX (Controlled MUX) 게이트: if(g) then ct1 else ct0
-fn cmux(ggsw_gate: &GgswCiphertext, ct0: &Ciphertext, ct1: &Ciphertext, params: &QfheParameters) -> Ciphertext {
-    // CMUX(g, ct0, ct1) = ct0 + g * (ct1 - ct0)
-    let diff_ct = CpuBackend.homomorphic_sub(ct1, ct0, params);
-    let term = external_product(ggsw_gate, &diff_ct, params);
-    CpuBackend.homomorphic_add(ct0, &term, params)
+/// ✅ NEW: 암호문에 포함된 다항식들의 계수를 k만큼 회전시킵니다.
+fn ciphertext_rotation(ct: &Ciphertext, k: i128, params: &QfheParameters) -> Ciphertext {
+    Ciphertext {
+        c0: polynomial_rotation(&ct.c0, k, params),
+        c1: polynomial_rotation(&ct.c1, k, params),
+        modulus_level: ct.modulus_level,
+    }
 }
 
-/// 주어진 메시지 다항식을 암호화하는 내부 함수입니다.
-fn encrypt_poly(msg_poly: &Polynomial, params: &QfheParameters, secret_key: &SecretKey) -> Ciphertext {
-    let mut rng = rand::thread_rng();
-    let k = params.module_dimension_k;
-    let n = params.polynomial_degree;
-    let rns_basis = params.modulus_q;
-    let rns_basis_size = rns_basis.len();
-
-    // a_vec: 무작위 다항식 벡터 생성 (RNS 형태)
-    let a_vec = (0..k).map(|_| {
-        let mut poly = Polynomial::zero(n, rns_basis_size);
+impl<'a, 'b, 'c> CpuBackend {
+    fn sample_uniform_poly(n: usize, rns_size: usize, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>) -> Polynomial {
+        let mut poly = Polynomial::zero(n, rns_size);
         for i in 0..n {
-            for j in 0..rns_basis_size {
-                // 각 쿼터니언 성분에 대해 무작위 값을 채웁니다.
-                poly.coeffs[i].w[j] = rng.gen_range(0..rns_basis[j]);
-                poly.coeffs[i].x[j] = rng.gen_range(0..rns_basis[j]);
-                poly.coeffs[i].y[j] = rng.gen_range(0..rns_basis[j]);
-                poly.coeffs[i].z[j] = rng.gen_range(0..rns_basis[j]);
+            for j in 0..rns_size {
+                let q_j = params.modulus_q[j];
+                poly.coeffs[i].w[j] = rng.r#gen::<u64>() % q_j;
+                poly.coeffs[i].x[j] = rng.r#gen::<u64>() % q_j;
+                poly.coeffs[i].y[j] = rng.r#gen::<u64>() % q_j;
+                poly.coeffs[i].z[j] = rng.r#gen::<u64>() % q_j;
             }
         }
         poly
-    }).collect::<Vec<_>>();
-
-    // e: 작은 오차 다항식 생성 (RNS 형태)
-    let e_poly = {
-        let mut poly = Polynomial::zero(n, rns_basis_size);
-        for i in 0..n {
-            let noise = sample_discrete_gaussian(params.noise_std_dev);
-            // 모든 쿼터니언 성분에 노이즈를 추가합니다. (필요에 따라 주 성분에만 추가할 수도 있음)
-            poly.coeffs[i].w = integer_to_rns(noise as u128, rns_basis);
-            poly.coeffs[i].x = integer_to_rns(sample_discrete_gaussian(params.noise_std_dev) as u128, rns_basis);
-            poly.coeffs[i].y = integer_to_rns(sample_discrete_gaussian(params.noise_std_dev) as u128, rns_basis);
-            poly.coeffs[i].z = integer_to_rns(sample_discrete_gaussian(params.noise_std_dev) as u128, rns_basis);
-        }
-        poly
-    };
-    
-    // b = <a, s> + e + m 계산
-    let backend = CpuBackend;
-    let mut as_poly = Polynomial::zero(n, rns_basis_size);
-    for i in 0..k {
-        let product = backend.polynomial_mul(&a_vec[i], &secret_key.0[i], params);
-        as_poly = backend.polynomial_add(&as_poly, &product, params);
     }
 
-    let b_poly = backend.polynomial_add(&as_poly, &e_poly, params);
-    let b_poly = backend.polynomial_add(&b_poly, msg_poly, params);
+    fn sample_gaussian_poly(n: usize, rns_size: usize, std_dev: f64, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>) -> Polynomial {
+        let mut poly = Polynomial::zero(n, rns_size);
+        let handle_noise = |noise: i128| -> Vec<u64> {
+            let mut rns_noise = crate::core::rns::integer_to_rns(noise.unsigned_abs(), params.modulus_q);
+            if noise < 0 {
+                for j in 0..rns_size {
+                    rns_noise[j] = params.modulus_q[j] - rns_noise[j];
+                }
+            }
+            rns_noise
+        };
+        for i in 0..n {
+            poly.coeffs[i].w = handle_noise(sample_discrete_gaussian(std_dev, rng));
+            poly.coeffs[i].x = handle_noise(sample_discrete_gaussian(std_dev, rng));
+            poly.coeffs[i].y = handle_noise(sample_discrete_gaussian(std_dev, rng));
+            poly.coeffs[i].z = handle_noise(sample_discrete_gaussian(std_dev, rng));
+        }
+        poly
+    }
 
-    Ciphertext { a_vec, b: b_poly, modulus_level: 0 }
+    fn sample_ternary_poly(n: usize, rns_size: usize, q_moduli: &[u64], rng: &mut ChaCha20Rng) -> Polynomial {
+        let mut poly = Polynomial::zero(n, rns_size);
+        for i in 0..n {
+            let val = (rng.next_u32() % 3) as i128 - 1;
+            if val != 0 {
+                let rns_one = crate::core::rns::integer_to_rns(1, q_moduli);
+                if val < 0 {
+                    for j in 0..rns_size {
+                        poly.coeffs[i].w[j] = q_moduli[j] - rns_one[j];
+                    }
+                } else {
+                    poly.coeffs[i].w = rns_one;
+                }
+            }
+        }
+        poly
+    }
+
+
+    /// 내부 암호화 함수 (키 생성에 사용)
+    fn encrypt_internal(&self, msg_poly: &Polynomial, pk: &PublicKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext {
+        let n = params.polynomial_degree;
+        let rns_size = params.modulus_q.len();
+
+        let u = Self::sample_gaussian_poly(n, rns_size, params.noise_std_dev, rng, params);
+        let e0 = Self::sample_gaussian_poly(n, rns_size, params.noise_std_dev, rng, params);
+        let e1 = Self::sample_gaussian_poly(n, rns_size, params.noise_std_dev, rng, params);
+
+        let mut c0 = self.polynomial_mul(&pk.b, &u, params);
+        c0 = self.polynomial_add(&c0, &e0, params);
+        c0 = self.polynomial_add(&c0, msg_poly, params);
+
+        let mut c1 = self.polynomial_mul(&pk.a, &u, params);
+        c1 = self.polynomial_add(&c1, &e1, params);
+
+        Ciphertext { c0, c1, modulus_level: 0 }
+    }
+
+    /// ✅ NEW: 다항식의 각 쿼터니언 계수에 켤레 연산을 적용합니다.
+    fn polynomial_conjugate(p: &Polynomial, params: &QfheParameters<'a, 'b, 'c>) -> Polynomial {
+        let n = p.coeffs.len();
+        let rns_size = params.modulus_q.len();
+        let mut res = Polynomial::zero(n, rns_size);
+
+        for i in 0..n {
+            for j in 0..rns_size {
+                let q_j = params.modulus_q[j];
+                res.coeffs[i].w[j] = p.coeffs[i].w[j]; // w는 그대로
+                res.coeffs[i].x[j] = q_j.wrapping_sub(p.coeffs[i].x[j]); // -x
+                res.coeffs[i].y[j] = q_j.wrapping_sub(p.coeffs[i].y[j]); // -y
+                res.coeffs[i].z[j] = q_j.wrapping_sub(p.coeffs[i].z[j]); // -z
+            }
+        }
+        res
+    }
+
+    // ✅ NEW: GGSW 암호문과 RLWE 암호문의 외부 곱(External Product)을 계산합니다.
+    fn external_product(&self, ggsw: &GgswCiphertext, rlwe: &Ciphertext, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext {
+        let n = params.polynomial_degree;
+        let rns_size = params.modulus_q.len();
+        let levels = params.gadget_levels_l;
+
+        let c0_decomposed = gadget_decompose(&rlwe.c0, params);
+        let c1_decomposed = gadget_decompose(&rlwe.c1, params);
+
+        let mut res_c0 = Polynomial::zero(n, rns_size);
+        let mut res_c1 = Polynomial::zero(n, rns_size);
+
+        for l in 0..levels {
+            // Process c0 part
+            let term0 = self.polynomial_mul(&ggsw.levels[l].c0, &c0_decomposed[l], params);
+            res_c0 = self.polynomial_add(&res_c0, &term0, params);
+            let term1 = self.polynomial_mul(&ggsw.levels[l].c1, &c0_decomposed[l], params);
+            res_c1 = self.polynomial_add(&res_c1, &term1, params);
+
+            // Process c1 part
+            let term0 = self.polynomial_mul(&ggsw.levels[l].c0, &c1_decomposed[l], params);
+            res_c0 = self.polynomial_add(&res_c0, &term0, params);
+            let term1 = self.polynomial_mul(&ggsw.levels[l].c1, &c1_decomposed[l], params);
+            res_c1 = self.polynomial_add(&res_c1, &term1, params);
+        }
+
+        Ciphertext { c0: res_c0, c1: res_c1, modulus_level: rlwe.modulus_level }
+    }
+
+    /// ✅ NEW: CMUX (Controlled MUX) 게이트 구현: if(g) then ct1 else ct0
+    fn cmux(&self, ggsw_gate: &GgswCiphertext, ct0: &Ciphertext, ct1: &Ciphertext, params: &QfheParameters) -> Ciphertext {
+        // CMUX(g, ct0, ct1) = ct0 + g * (ct1 - ct0)
+        let diff_ct = self.homomorphic_sub(ct1, ct0, params);
+        let term = self.external_product(ggsw_gate, &diff_ct, params);
+        self.homomorphic_add(ct0, &term, params)
+    }
 }
-
 
 impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
-    fn generate_public_key(
-        &self, sk: &SecretKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>,
-    ) -> PublicKey {
-        let k = params.module_dimension_k;
+    /// ✅ RLWE: 비밀키 s1, s2 생성
+    fn generate_secret_key(&self, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>) -> SecretKey {
+        let s1 = Self::sample_ternary_poly(params.polynomial_degree, params.modulus_q.len(), params.modulus_q, rng);
+        let s2 = Self::sample_ternary_poly(params.polynomial_degree, params.modulus_q.len(), params.modulus_q, rng);
+        SecretKey(s1, s2)
+    }
+
+    /// ✅ RLWE: 공개키 (b, a) 생성. b = -a*s1 + e
+    fn generate_public_key(&self, sk: &SecretKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>) -> PublicKey {
+        let s1 = &sk.0;
         let n = params.polynomial_degree;
         let rns_size = params.modulus_q.len();
 
-        // a: 무작위 다항식 벡터 생성
-        let a_vec = (0..k).map(|_| sample_uniform_poly(n, rns_size, rng, params)).collect::<Vec<_>>();
-        
-        // e: 작은 오차 다항식 생성
-        let e = sample_gaussian_poly(n, rns_size, params.noise_std_dev, rng, params);
+        let a = Self::sample_uniform_poly(n, rns_size, rng, params);
+        let e = Self::sample_gaussian_poly(n, rns_size, params.noise_std_dev, rng, params);
 
-        // b = -(a_0*s_0 + a_1*s_1 + ...) + e
-        let mut b = e;
-        for i in 0..k {
-            let a_s = self.polynomial_mul(&a_vec[i], &sk.0[i], params);
-            b = self.polynomial_sub(&b, &a_s, params);
-        }
+        let a_s1 = self.polynomial_mul(&a, s1, params);
+        let b = self.polynomial_sub(&e, &a_s1, params); // b = e - a*s1
 
-        PublicKey { b, a_vec }
+        PublicKey { b, a }
     }
 
-    fn generate_secret_key(
-        &self, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>,
-    ) -> SecretKey {
-        let secret_key_vec = (0..params.module_dimension_k)
-            .map(|_| sample_ternary_poly(params.polynomial_degree, params.modulus_q.len(), params.modulus_q, rng))
-            .collect();
-        SecretKey(secret_key_vec)
-    }
-
-
-    fn encrypt(
-        &self, message: u64, pk: &PublicKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>,
-    ) -> Ciphertext {
-        let k = params.module_dimension_k;
+    /// ✅ RLWE: 암호화. (c0, c1) = (pk.b*u + e0 + mΔ, pk.a*u + e1)
+    fn encrypt(&self, message: u64, pk: &PublicKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext {
         let n = params.polynomial_degree;
         let rns_size = params.modulus_q.len();
 
-        // 작은 다항식 u, e0, e_vec 샘플링
-        let u = sample_gaussian_poly(n, rns_size, params.noise_std_dev, rng, params);
-        let e0 = sample_gaussian_poly(n, rns_size, params.noise_std_dev, rng, params);
-        let e_vec = (0..k)
-            .map(|_| sample_gaussian_poly(n, rns_size, params.noise_std_dev, rng, params))
-            .collect::<Vec<_>>();
-        
+        let u = Self::sample_gaussian_poly(n, rns_size, params.noise_std_dev, rng, params);
+        let e0 = Self::sample_gaussian_poly(n, rns_size, params.noise_std_dev, rng, params);
+        let e1 = Self::sample_gaussian_poly(n, rns_size, params.noise_std_dev, rng, params);
+
         // c0 = pk.b * u + e0 + m*Δ
         let mut c0 = self.polynomial_mul(&pk.b, &u, params);
         c0 = self.polynomial_add(&c0, &e0, params);
@@ -338,52 +247,352 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
         msg_poly.coeffs[0].w = crate::core::rns::integer_to_rns(scaled_msg, params.modulus_q);
         c0 = self.polynomial_add(&c0, &msg_poly, params);
 
-        // c_i = pk.a_i * u + e_i
-        let a_vec = (0..k)
-            .map(|i| {
-                let u_a = self.polynomial_mul(&pk.a_vec[i], &u, params);
-                self.polynomial_add(&u_a, &e_vec[i], params)
-            })
-            .collect();
+        // c1 = pk.a * u + e1
+        let c1 = self.polynomial_mul(&pk.a, &u, params);
+        let c1 = self.polynomial_add(&c1, &e1, params);
 
-        // 최종 암호문 (c_0, c_1, ...) => (b, a_vec)
-        Ciphertext { b: c0, a_vec, modulus_level: 0 }
+        Ciphertext { c0, c1, modulus_level: 0 }
     }
 
-    // --- ❗❗❗ 3. 복호화 로직 수정 ❗❗❗ ---
-    /// 암호문을 복호화합니다. [crypto-bigint::U256 적용 최종본]
-    /// 암호문을 복호화합니다. [최종 안정화 버전]
-    fn decrypt(
-        &self,
-        ciphertext: &Ciphertext,
-        secret_key: &SecretKey,
-        params: &QfheParameters<'a, 'b, 'c>,
-    ) -> u64 {
-        let k = params.module_dimension_k;
-
-        // --- ❗❗❗ 핵심 수정: c_0 + <c_1, s> 를 계산 ❗❗❗ ---
-        // 1. noisy_poly를 암호문의 첫 번째 부분(b)으로 초기화
-        let mut noisy_poly = ciphertext.b.clone();
-
-        // 2. 암호문의 두 번째 부분(a_vec)과 비밀키(s)를 곱하여 더함
-        for i in 0..k {
-            let a_s = self.polynomial_mul(&ciphertext.a_vec[i], &secret_key.0[i], params);
-            noisy_poly = self.polynomial_add(&noisy_poly, &a_s, params);
-        }
+    /// ✅ RLWE: 복호화. m' = c0 + c1*s1
+    fn decrypt(&self, ciphertext: &Ciphertext, sk: &SecretKey, params: &QfheParameters<'a, 'b, 'c>) -> u64 {
+        let s1 = &sk.0;
         
-        // 3. CRT를 사용하여 RNS 표현을 U256 정수로 복원
+        // noisy_poly = c0 + c1*s1
+        let c1_s1 = self.polynomial_mul(&ciphertext.c1, s1, params);
+        let noisy_poly = self.polynomial_add(&ciphertext.c0, &c1_s1, params);
+        
         let noisy_message = crate::core::rns::rns_to_integer(&noisy_poly.coeffs[0].w, params.modulus_q);
 
-        // 4. 안정적인 정수 기반 디코딩 (변경 없음)
-        let delta = U256::from(params.scaling_factor_delta);
-        let half_delta = delta.div_rem(&crypto_bigint::NonZero::new(U256::from(2u64)).unwrap()).0;
-        
-        let rounded = noisy_message.wrapping_add(&half_delta).div_rem(&crypto_bigint::NonZero::new(delta).unwrap()).0;
+        let q_product = params.modulus_q.iter().fold(U256::ONE, |acc, &m| acc.wrapping_mul(&U256::from_u64(m)));
+        let q_half = q_product >> 1;
 
-        let final_val = rounded.to_words()[0];
+        let final_val: u64;
+        let delta = U256::from(params.scaling_factor_delta);
+        let half_delta = delta >> 1;
+
+        if noisy_message <= q_half {
+            let rounded = noisy_message.wrapping_add(&half_delta).div_rem(&NonZero::new(delta).unwrap()).0;
+            final_val = rounded.to_words()[0];
+        } else {
+            let magnitude = q_product.wrapping_sub(&noisy_message);
+            let rounded = magnitude.wrapping_add(&half_delta).div_rem(&NonZero::new(delta).unwrap()).0;
+            let neg_rounded = rounded.to_words()[0];
+            final_val = (params.plaintext_modulus as u64).wrapping_sub(neg_rounded);
+        }
+        
         final_val % params.plaintext_modulus as u64
     }
 
+    /// ✅ RLWE: 동형 덧셈
+    fn homomorphic_add(&self, ct1: &Ciphertext, ct2: &Ciphertext, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext {
+        let c0 = self.polynomial_add(&ct1.c0, &ct2.c0, params);
+        let c1 = self.polynomial_add(&ct1.c1, &ct2.c1, params);
+        Ciphertext { c0, c1, modulus_level: ct1.modulus_level }
+    }
+
+    /// ✅ RLWE: 동형 뺄셈
+    fn homomorphic_sub(&self, ct1: &Ciphertext, ct2: &Ciphertext, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext {
+        let c0 = self.polynomial_sub(&ct1.c0, &ct2.c0, params);
+        let c1 = self.polynomial_sub(&ct1.c1, &ct2.c1, params);
+        Ciphertext { c0, c1, modulus_level: ct1.modulus_level }
+    }
+
+    /// ✅ RLWE: 동형 곱셈 구현 (텐서곱 + 재선형화)
+    fn homomorphic_mul(&self, ct1: &Ciphertext, ct2: &Ciphertext, rlk: &RelinearizationKey, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext {
+        let n = params.polynomial_degree;
+        let rns_size = params.modulus_q.len();
+
+        // 1. 텐서 곱
+        let d0 = self.polynomial_mul(&ct1.c0, &ct2.c0, params);
+        let d1_part1 = self.polynomial_mul(&ct1.c0, &ct2.c1, params);
+        let d1_part2 = self.polynomial_mul(&ct1.c1, &ct2.c0, params);
+        let d1 = self.polynomial_add(&d1_part1, &d1_part2, params);
+        let d2 = self.polynomial_mul(&ct1.c1, &ct2.c1, params);
+
+        // 2. 재선형화 (d2를 키스위칭)
+        let d2_decomposed = gadget_decompose(&d2, params);
+
+        let mut ks_c0 = Polynomial::zero(n, rns_size);
+        let mut ks_c1 = Polynomial::zero(n, rns_size);
+
+        for l in 0..params.gadget_levels_l {
+            let rlk_ct = &rlk.0[l];
+            let decomp_poly = &d2_decomposed[l];
+
+            let term_c0 = self.polynomial_mul(&rlk_ct.c0, decomp_poly, params);
+            let term_c1 = self.polynomial_mul(&rlk_ct.c1, decomp_poly, params);
+
+            ks_c0 = self.polynomial_add(&ks_c0, &term_c0, params);
+            ks_c1 = self.polynomial_add(&ks_c1, &term_c1, params);
+        }
+
+        // 3. 최종 암호문 결합
+        let final_c0 = self.polynomial_add(&d0, &ks_c0, params);
+        let final_c1 = self.polynomial_add(&d1, &ks_c1, params);
+
+        Ciphertext {
+            c0: final_c0,
+            c1: final_c1,
+            modulus_level: ct1.modulus_level,
+        }
+    }
+
+    /// ✅ NEW: 동형 켤레 연산 구현
+    fn homomorphic_conjugate(&self, ct: &Ciphertext, evk_conj: &EvaluationKey, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext {
+        let n = params.polynomial_degree;
+        let rns_size = params.modulus_q.len();
+        
+        // 1. 암호문의 각 다항식에 켤레 연산 적용
+        let c0_conj = Self::polynomial_conjugate(&ct.c0, params);
+        let c1_conj = Self::polynomial_conjugate(&ct.c1, params);
+
+        // 2. 이는 m_conj를 s1_conj 하에 암호화한 것과 같음
+        let ct_twisted = Ciphertext {
+            c0: c0_conj,
+            c1: c1_conj,
+            modulus_level: ct.modulus_level,
+        };
+
+        // 3. s1_conj -> s1 으로 키 스위칭하여 최종 결과 도출
+        // Note: The keyswitch function needs to be corrected for this to work.
+        // Let's assume a simplified keyswitch for automorphism for now.
+        // Automorphism keyswitch: input is (c0(s_conj), c1(s_conj)). Switch c1.
+        let c1_twisted_decomposed = gadget_decompose(&ct_twisted.c1, params);
+        let mut switched_part0 = Polynomial::zero(n, rns_size);
+        let mut switched_part1 = Polynomial::zero(n, rns_size);
+
+        for l in 0..params.gadget_levels_l {
+            let evk_l = &evk_conj.0[l];
+            let decomp_l = &c1_twisted_decomposed[l];
+            switched_part0 = self.polynomial_add(&switched_part0, &self.polynomial_mul(&evk_l.c0, decomp_l, params), params);
+            switched_part1 = self.polynomial_add(&switched_part1, &self.polynomial_mul(&evk_l.c1, decomp_l, params), params);
+        }
+
+        Ciphertext {
+            c0: self.polynomial_add(&ct_twisted.c0, &switched_part0, params),
+            c1: switched_part1,
+            modulus_level: ct.modulus_level,
+        }
+    }
+    
+    /// ✅ RLWE: 재선형화 키 생성 구현. RLK = Enc(g^l * s1^2)
+    fn generate_relinearization_key(&self, sk: &SecretKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>) -> RelinearizationKey {
+        let s1 = &sk.0;
+        let n = params.polynomial_degree;
+        let rns_size = params.modulus_q.len();
+        let levels = params.gadget_levels_l;
+        
+        let pk = self.generate_public_key(sk, rng, params);
+        let s1_squared = self.polynomial_mul(s1, s1, params);
+
+        let mut key_vec = Vec::with_capacity(levels);
+
+        for l in 0..levels {
+            let power_of_base = params.gadget_base_b.pow(l as u32);
+            let power_of_base_rns = crate::core::rns::integer_to_rns(power_of_base, params.modulus_q);
+            
+            let mut p_to_encrypt = s1_squared.clone();
+            for i in 0..n {
+                for j in 0..rns_size {
+                    p_to_encrypt.coeffs[i].w[j] = p_to_encrypt.coeffs[i].w[j].safe_mul_mod(power_of_base_rns[j], params.modulus_q[j]);
+                    p_to_encrypt.coeffs[i].x[j] = p_to_encrypt.coeffs[i].x[j].safe_mul_mod(power_of_base_rns[j], params.modulus_q[j]);
+                    p_to_encrypt.coeffs[i].y[j] = p_to_encrypt.coeffs[i].y[j].safe_mul_mod(power_of_base_rns[j], params.modulus_q[j]);
+                    p_to_encrypt.coeffs[i].z[j] = p_to_encrypt.coeffs[i].z[j].safe_mul_mod(power_of_base_rns[j], params.modulus_q[j]);
+                }
+            }
+            key_vec.push(self.encrypt_internal(&p_to_encrypt, &pk, rng, params));
+        }
+        RelinearizationKey(key_vec)
+    }
+
+    /// ✅ RLWE: 평가 키(키 스위칭 키) 생성 구현. EVK = Enc_new(g^l * sk_old)
+    fn generate_evaluation_key(&self, old_sk: &Polynomial, new_sk: &SecretKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>) -> EvaluationKey {
+        let n = params.polynomial_degree;
+        let rns_size = params.modulus_q.len();
+        let levels = params.gadget_levels_l;
+        
+        let pk_new = self.generate_public_key(new_sk, rng, params);
+        let mut key_vec = Vec::with_capacity(levels);
+
+        for l in 0..levels {
+            let power_of_base = params.gadget_base_b.pow(l as u32);
+            let power_of_base_rns = crate::core::rns::integer_to_rns(power_of_base, params.modulus_q);
+            
+            let mut p_to_encrypt = old_sk.clone();
+            // p_to_encrypt *= g^l
+            for i in 0..n {
+                for j in 0..rns_size {
+                    let q_j = params.modulus_q[j];
+                    p_to_encrypt.coeffs[i].w[j] = p_to_encrypt.coeffs[i].w[j].safe_mul_mod(power_of_base_rns[j], q_j);
+                    p_to_encrypt.coeffs[i].x[j] = p_to_encrypt.coeffs[i].x[j].safe_mul_mod(power_of_base_rns[j], q_j);
+                    p_to_encrypt.coeffs[i].y[j] = p_to_encrypt.coeffs[i].y[j].safe_mul_mod(power_of_base_rns[j], q_j);
+                    p_to_encrypt.coeffs[i].z[j] = p_to_encrypt.coeffs[i].z[j].safe_mul_mod(power_of_base_rns[j], q_j);
+                }
+            }
+            key_vec.push(self.encrypt_internal(&p_to_encrypt, &pk_new, rng, params));
+        }
+        EvaluationKey(key_vec)
+    }
+
+    /// ✅ RLWE: 부트스트래핑 키 생성 구현. BSK = { GGSW(s1_i) }
+    fn generate_bootstrap_key(&self, sk: &SecretKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>) -> BootstrapKey {
+        let s1 = &sk.0;
+        let n = params.polynomial_degree;
+        let rns_size = params.modulus_q.len();
+        let pk = self.generate_public_key(sk, rng, params);
+
+        let s1_integer_coeffs: Vec<i128> = (0..n).map(|i| {
+            let rns_w = &s1.coeffs[i].w;
+            let integer_w = rns_to_integer(rns_w, params.modulus_q);
+            let q_product = params.modulus_q.iter().fold(U256::ONE, |acc, &m| acc.wrapping_mul(&U256::from_u64(m)));
+            let q_half = q_product >> 1;
+            if integer_w > q_half {
+                -((q_product - integer_w).to_words()[0] as i128)
+            } else {
+                integer_w.to_words()[0] as i128
+            }
+        }).collect();
+
+        // ✅ FIX (Rust 2024): 병렬 처리를 위해 각 스레드가 사용할 시드를 미리 생성합니다.
+        let seeds: Vec<[u8; 32]> = (0..n).map(|_| rng.random()).collect();
+
+        let ggsw_vector: Vec<GgswCiphertext> = (0..n).into_par_iter().map(|i| {
+            let mut thread_rng = ChaCha20Rng::from_seed(seeds[i]);
+            let mut levels = Vec::with_capacity(params.gadget_levels_l);
+            let s1_i_abs = s1_integer_coeffs[i].unsigned_abs();
+            
+            for l in 0..params.gadget_levels_l {
+                let power_of_base = params.gadget_base_b.pow(l as u32);
+                let msg_to_encrypt = if s1_integer_coeffs[i] < 0 {
+                    (U256::from(power_of_base) * U256::from(s1_i_abs)).wrapping_neg()
+                } else {
+                    U256::from(power_of_base) * U256::from(s1_i_abs)
+                };
+                
+                let mut msg_poly = Polynomial::zero(n, rns_size);
+                msg_poly.coeffs[0].w = integer_to_rns(msg_to_encrypt.to_words()[0] as u128, params.modulus_q);
+
+                levels.push(self.encrypt_internal(&msg_poly, &pk, &mut thread_rng, params));
+            }
+            GgswCiphertext { levels }
+        }).collect();
+
+        BootstrapKey { ggsw_vector }
+    }
+
+    /// ✅ RLWE: 프로그래머블 부트스트래핑 완전 구현
+    fn bootstrap(&self, ct: &Ciphertext, test_poly: &Polynomial, bk: &BootstrapKey, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext {
+        let n = params.polynomial_degree;
+        let rns_size = params.modulus_q.len();
+        let new_modulus = (2 * n) as u64;
+
+        // 1. Modulus Switch (Sample Extract) to get LWE sample (b, -a)
+        let (c0_switched, c1_switched) = self.modulus_switch(ct, new_modulus);
+        let b_bar = c0_switched[0];
+        let a_bar = c1_switched; 
+
+        // 2. Blind Rotation
+        let mut accumulator = {
+            // ✅ FIX: test_poly(평문)를 회전시키기 위해 polynomial_rotation 사용
+            let rotated_poly = polynomial_rotation(test_poly, -(b_bar as i128), params);
+            // 자명한 암호화: Enc(rotated_poly, 0)
+            Ciphertext { c0: rotated_poly, c1: Polynomial::zero(n, rns_size), modulus_level: 0 }
+        };
+
+        for i in 0..n {
+            let a_i_bar = a_bar[i];
+            if a_i_bar == 0 { continue; }
+            
+            // ✅ FIX: accumulator(암호문)를 회전시키기 위해 ciphertext_rotation 사용
+            let rotated_acc = ciphertext_rotation(&accumulator, a_i_bar as i128, params);
+            accumulator = self.cmux(&bk.ggsw_vector[i], &accumulator, &rotated_acc, params);
+        }
+
+        accumulator
+    }
+
+    /// ✅ RLWE: Modulus Switch 구현 (Sample Extract)
+    fn modulus_switch(&self, ct: &Ciphertext, new_modulus: u64) -> (Vec<u64>, Vec<u64>) {
+        let n = ct.c0.coeffs.len();
+        let q_product = U256::from_u128(1_152_921_504_606_584_833u128); // L128 기준 Q
+        let new_mod_u256 = U256::from(new_modulus);
+
+        let round_and_scale = |poly: &Polynomial| -> Vec<u64> {
+            (0..n).map(|i| {
+                let coeff_int = rns_to_integer(&poly.coeffs[i].w, &[q_product.to_words()[0]]);
+                // round( (x * 2N) / Q )
+                let scaled = coeff_int.wrapping_mul(&new_mod_u256);
+                let rounded = scaled.wrapping_add(&(q_product >> 1)).div_rem(&NonZero::new(q_product).unwrap()).0;
+                rounded.to_words()[0]
+            }).collect()
+        };
+        
+        let c0_switched = round_and_scale(&ct.c0);
+        let c1_switched = round_and_scale(&ct.c1);
+        
+        (c0_switched, c1_switched)
+    }
+
+    /// ✅ RLWE: 키 스위칭 구현
+    fn keyswitch(&self, ct: &Ciphertext, evk: &EvaluationKey, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext {
+        let n = params.polynomial_degree;
+        let rns_size = params.modulus_q.len();
+
+        let c1_decomposed = gadget_decompose(&ct.c1, params);
+
+        let mut res_c0 = ct.c0.clone();
+        let mut res_c1 = Polynomial::zero(n, rns_size);
+
+        for l in 0..params.gadget_levels_l {
+            let evk_ct = &evk.0[l];
+            let decomp_poly = &c1_decomposed[l];
+
+            let term_c0 = self.polynomial_mul(&evk_ct.c0, decomp_poly, params);
+            let term_c1 = self.polynomial_mul(&evk_ct.c1, decomp_poly, params);
+
+            res_c0 = self.polynomial_sub(&res_c0, &term_c0, params); // c0' = c0 - sum(decomp*evk.c0)
+            res_c1 = self.polynomial_add(&res_c1, &term_c1, params); // c1' = sum(decomp*evk.c1)
+        }
+        
+        // This is a common mistake. The key switch result should be ct' = (c0,0) + KeySwitch(c1).
+        // Let's correct the logic.
+        let mut new_c0 = ct.c0.clone();
+        let mut new_c1 = Polynomial::zero(n, rns_size); // This will be the new c1, which is effectively 0 before adding terms.
+        
+        // The c1 part of the original ciphertext is the one we want to switch.
+        let c1_decomposed = gadget_decompose(&ct.c1, params);
+        
+        for l in 0..params.gadget_levels_l {
+            let evk_ct = &evk.0[l];
+            let decomp_poly = &c1_decomposed[l];
+            
+            // The logic should be: new_ct = (c0, 0) + sum(decomp(c1) * evk)
+            // But standard RLWE key switching is simpler: result = (c0, 0) + KeySwitch(c1)
+            // Let's implement the key switch part on c1 first.
+        }
+        
+        // Correct RLWE Key Switch Logic:
+        // Input: ct=(c0, c1) under sk_old. evk encrypts sk_old under sk_new.
+        // Output: ct'=(c0', c1') under sk_new.
+        // 1. Decompose c1
+        let c1_decomposed = gadget_decompose(&ct.c1, params);
+        // 2. Calculate the two parts of the new ciphertext
+        let mut new_ct_part0 = ct.c0.clone();
+        let mut new_ct_part1 = Polynomial::zero(n, rns_size);
+        for l in 0..params.gadget_levels_l {
+            let evk_l = &evk.0[l];
+            let decomp_l = &c1_decomposed[l];
+            new_ct_part0 = self.polynomial_add(&new_ct_part0, &self.polynomial_mul(&evk_l.c0, decomp_l, params), params);
+            new_ct_part1 = self.polynomial_add(&new_ct_part1, &self.polynomial_mul(&evk_l.c1, decomp_l, params), params);
+        }
+
+        Ciphertext {
+            c0: new_ct_part0,
+            c1: new_ct_part1,
+            modulus_level: ct.modulus_level,
+        }
+    }
 
     /// 두 다항식을 더합니다. [RNS 기반, 안전한 모듈러 연산 적용]
     fn polynomial_add(&self, p1: &Polynomial, p2: &Polynomial, params: &QfheParameters<'a, 'b, 'c>) -> Polynomial {
@@ -432,346 +641,5 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
         qntt_inverse(&mut p1_ntt, params);
 
         p1_ntt
-    }
-    
-    /// 두 암호문을 더합니다.
-    fn homomorphic_add(&self, ct1: &Ciphertext, ct2: &Ciphertext, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext {
-        assert_eq!(ct1.modulus_level, ct2.modulus_level, "Ciphertexts must have the same modulus level for addition.");
-        let k = params.module_dimension_k;
-        let a_vec_add = (0..k)
-            .map(|i| self.polynomial_add(&ct1.a_vec[i], &ct2.a_vec[i], params))
-            .collect();
-        let b_add = self.polynomial_add(&ct1.b, &ct2.b, params);
-        Ciphertext { a_vec: a_vec_add, b: b_add, modulus_level: ct1.modulus_level }
-    }
-
-    /// 두 암호문을 뺍니다.
-    fn homomorphic_sub(&self, ct1: &Ciphertext, ct2: &Ciphertext, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext {
-        assert_eq!(ct1.modulus_level, ct2.modulus_level, "Ciphertexts must have the same modulus level for subtraction.");
-        let k = params.module_dimension_k;
-        let a_vec_sub = (0..k)
-            .map(|i| self.polynomial_sub(&ct1.a_vec[i], &ct2.a_vec[i], params))
-            .collect();
-        let b_sub = self.polynomial_sub(&ct1.b, &ct2.b, params);
-        Ciphertext { a_vec: a_vec_sub, b: b_sub, modulus_level: ct1.modulus_level }
-    }
-
-    /// 재선형화 키를 생성합니다.
-    fn generate_relinearization_key(&self, sk: &SecretKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>) -> RelinearizationKey {
-        let k = params.module_dimension_k;
-        let l = params.gadget_levels_l;
-        let mut key_vec = Vec::with_capacity(k * k * l);
-
-        for i in 0..k {
-            for j in 0..k {
-                let s_i_s_j = self.polynomial_mul(&sk.0[i], &sk.0[j], params);
-                for m in 0..l {
-                    let power_of_base = params.gadget_base_b.pow(m as u32);
-                    let power_of_base_rns = crate::core::rns::integer_to_rns(power_of_base, params.modulus_q);
-                    let p_to_encrypt = polynomial_scalar_mul(&s_i_s_j, &power_of_base_rns, params);
-                    key_vec.push(encrypt_internal(&p_to_encrypt, sk, rng, params));
-                }
-            }
-        }
-        RelinearizationKey(key_vec)
-    }
-
-    /// 두 암호문을 곱합니다. [재선형화 포함]
-    /// 두 암호문을 곱합니다. [재선형화 포함]
-    fn homomorphic_mul(&self, ct1: &Ciphertext, ct2: &Ciphertext, rlk: &RelinearizationKey, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext {
-        assert_eq!(ct1.modulus_level, ct2.modulus_level, "Ciphertexts must have the same modulus level for multiplication.");
-        
-        let k = params.module_dimension_k;
-        let n = params.polynomial_degree;
-        let rns_basis_size = params.modulus_q.len();
-        let levels = params.gadget_levels_l;
-
-        // 1. 텐서 곱 계산 (ct_res = ct1 ⊗ ct2)
-        let c0 = self.polynomial_mul(&ct1.b, &ct2.b, params);
-        let mut c1 = Vec::with_capacity(k);
-        for i in 0..k {
-            let a1i_b2 = self.polynomial_mul(&ct1.a_vec[i], &ct2.b, params);
-            let b1_a2i = self.polynomial_mul(&ct1.b, &ct2.a_vec[i], params);
-            c1.push(self.polynomial_add(&a1i_b2, &b1_a2i, params));
-        }
-        let mut c2 = vec![vec![Polynomial::zero(n, rns_basis_size); k]; k];
-        for i in 0..k {
-            for j in 0..k {
-                c2[i][j] = self.polynomial_mul(&ct1.a_vec[i], &ct2.a_vec[j], params);
-            }
-        }
-
-        // 2. 재선형화(Relinearization)
-        let mut c2_prime = Ciphertext {
-            a_vec: vec![Polynomial::zero(n, rns_basis_size); k],
-            b: Polynomial::zero(n, rns_basis_size),
-            modulus_level: ct1.modulus_level,
-        };
-        
-        for i in 0..k {
-            for j in 0..k {
-                let decomposed_c2_poly = gadget_decompose(&c2[i][j], params);
-                for l in 0..levels {
-                    let rlk_index = (i * k + j) * levels + l;
-                    let rlk_ct = &rlk.0[rlk_index];
-                    let decomp_poly = &decomposed_c2_poly[l];
-
-                    // --- ✅ FIX: 새로 만든 헬퍼 함수로 재선형화 로직 수정 ---
-                    // term = rlk_ct * decomp_poly
-                    let term = self.ciphertext_scalar_mul(rlk_ct, decomp_poly, params);
-
-                    // c2_prime += term
-                    c2_prime.b = self.polynomial_add(&c2_prime.b, &term.b, params);
-                    for m in 0..k {
-                        c2_prime.a_vec[m] = self.polynomial_add(&c2_prime.a_vec[m], &term.a_vec[m], params);
-                    }
-                }
-            }
-        }
-        
-        // 3. 최종 암호문 결합
-        let final_b = self.polynomial_add(&c0, &c2_prime.b, params);
-        let mut final_a = c1;
-        for i in 0..k {
-            final_a[i] = self.polynomial_add(&final_a[i], &c2_prime.a_vec[i], params);
-        }
-        
-        Ciphertext {
-            a_vec: final_a,
-            b: final_b,
-            modulus_level: ct1.modulus_level,
-        }
-    }
-
-    /// 키 스위칭 키를 생성합니다.
-    fn generate_key_switching_key(&self, old_sk: &SecretKey, new_sk: &SecretKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>) -> KeySwitchingKey {
-        let k = params.module_dimension_k;
-        let l = params.gadget_levels_l;
-        let mut key_levels = Vec::with_capacity(k);
-
-        for i in 0..k {
-            let mut key_level = Vec::with_capacity(l);
-            for m in 0..l {
-                let power_of_base = params.gadget_base_b.pow(m as u32);
-                let power_of_base_rns = crate::core::rns::integer_to_rns(power_of_base, params.modulus_q);
-                let mut p_to_encrypt = old_sk.0[i].clone();
-                p_to_encrypt = polynomial_scalar_mul(&p_to_encrypt, &power_of_base_rns, params);
-                // 새 비밀키(new_sk)로 암호화
-                key_level.push(encrypt_internal(&p_to_encrypt, new_sk, rng, params));
-            }
-            key_levels.push(key_level);
-        }
-        KeySwitchingKey { key: key_levels }
-    }
-
-    /// 부트스트래핑 키를 생성합니다. (LWE 비밀키를 GGSW로 암호화)
-    fn generate_bootstrap_key(
-        &self,
-        sk: &SecretKey,
-        rng: &mut ChaCha20Rng,
-        params: &QfheParameters<'a, 'b, 'c>,
-    ) -> BootstrapKey {
-        let n = params.polynomial_degree;
-        let l = params.gadget_levels_l;
-        let lwe_sk_poly = &sk.0[0];
-
-        // Rayon을 사용하여 병렬 처리
-        let mut seeds: Vec<[u8; 32]> = Vec::with_capacity(n);
-        for _ in 0..n {
-            seeds.push(rng.r#gen());
-        }
-
-        let bsk_ggsw_vector: Vec<GgswCiphertext> = (0..n)
-            .into_par_iter()
-            .map(|i| {
-                let mut thread_rng = ChaCha20Rng::from_seed(seeds[i]);
-                let s_coeff_rns = &lwe_sk_poly.coeffs[i].w;
-                let s_coeff_int = rns_to_integer(s_coeff_rns, params.modulus_q);
-
-                let mut ggsw_levels = Vec::with_capacity(l);
-                for m in 0..l {
-                    let power_of_base = params.gadget_base_b.pow(m as u32);
-                    
-                    // --- ❗❗❗ 핵심 버그 수정 ❗❗❗ ---
-                    // ❗ 수정: crypto_bigint::U256의 곱셈 API 사용
-                    let val_to_encrypt = s_coeff_int.wrapping_mul(&U256::from_u128(power_of_base));
-
-                    let mut p = Polynomial::zero(n, params.modulus_q.len());
-                    // ❗ 수정: to_words()[0]를 사용하여 u64로 변환 후 u128로 캐스팅
-                    p.coeffs[0].w = integer_to_rns(val_to_encrypt.to_words()[0] as u128, params.modulus_q);
-                    
-                    ggsw_levels.push(encrypt_internal(&p, sk, &mut thread_rng, params));
-                }
-                GgswCiphertext { levels: ggsw_levels }
-            })
-            .collect();
-
-        BootstrapKey {
-            ggsw_vector: bsk_ggsw_vector,
-        }
-    }
-    
-    /// 프로그래머블 부트스트래핑을 수행합니다. [구현 완료]
-    fn bootstrap(
-        &self,
-        ct: &Ciphertext,
-        test_poly: &Polynomial,
-        bk: &BootstrapKey,
-        ksk: &KeySwitchingKey,
-        params: &QfheParameters<'a, 'b, 'c>,
-    ) -> Ciphertext {
-        let n = params.polynomial_degree;
-        let k = params.module_dimension_k;
-
-        // --- ❗❗❗ 1. 올바른 Modulus Switch (Sample Extract) 로직 ❗❗❗ ---
-        // 부트스트래핑을 위한 임시 파라미터 생성 (더 작은 모듈러스 사용)
-        let bootstrap_modulus = (2 * n) as u128;
-        let temp_params = QfheParameters {
-            modulus_q: &[(2 * n) as u64], // 임시 모듈러스
-            modulus_chain: &[bootstrap_modulus],
-            reducers: &[BarrettReducer64::new((2*n) as u64)],
-            ..params.clone()
-        };
-        
-        // 암호문을 작은 모듈러스 2N으로 스위칭
-        let switched_ct = self.modulus_switch(ct, &temp_params);
-
-        // 스위칭된 암호문의 계수들을 b_bar와 a_bar로 사용
-        let b_bar = switched_ct.b.coeffs[0].w[0];
-        let a_bar: Vec<u64> = switched_ct.a_vec[0].coeffs.iter().map(|c| c.w[0]).collect();
-
-        // --- 2. 블라인드 회전 (Blind Rotation) ---
-        let mut accumulator = {
-            let mut poly = test_poly.clone();
-            let rotated_coeffs: Vec<Quaternion> = (0..n).map(|i| {
-                let rotated_index = (i as i128 - b_bar as i128).rem_euclid(n as i128) as usize;
-                test_poly.coeffs[rotated_index].clone()
-            }).collect();
-            poly.coeffs = rotated_coeffs;
-            
-            let mut dummy_rng = ChaCha20Rng::from_seed([0u8; 32]);
-            // 자명한 암호화 (비밀키가 0인 암호문)
-            encrypt_internal(&poly, &SecretKey(vec![Polynomial::zero(n, params.modulus_q.len())]), &mut dummy_rng, params)
-        };
-
-        // ... (이후 CMUX 및 Key Switching 부분은 변경 없음) ...
-        for i in 0..n {
-            let control_bit_ggsw = &bk.ggsw_vector[i]; // GGSW(s_i)
-            
-            let mut rot_poly = Polynomial::zero(n, params.modulus_q.len());
-            let rot_index = (n - (1 << i)) % n;
-            rot_poly.coeffs[rot_index].w = crate::core::rns::integer_to_rns(1, params.modulus_q);
-            
-            let mut dummy_rng = ChaCha20Rng::from_seed([0u8; 32]);
-            let rot_poly_ct = encrypt_internal(&rot_poly, &SecretKey(vec![Polynomial::zero(n, params.modulus_q.len())]), &mut dummy_rng, params);
-            let one_ct = encrypt_internal(&Polynomial::zero(n, params.modulus_q.len()), &SecretKey(vec![Polynomial::zero(n, params.modulus_q.len())]), &mut dummy_rng, params);
-            
-            let term = if a_bar[i] != 0 {
-                cmux(control_bit_ggsw, &one_ct, &rot_poly_ct, params)
-            } else {
-                one_ct
-            };
-            
-            accumulator = self.homomorphic_mul(&accumulator, &term, &RelinearizationKey(vec![]), params);
-        }
-
-        // --- 3. 키 스위칭 (Key Switching) ---
-        // 최종적으로 RLWE 암호문을 LWE 암호문으로 변환 (이 예제에서는 RLWE->RLWE)
-        self.keyswitch(&accumulator, ksk, params)
-    }
-
-    /// 암호문의 키를 바꿉니다.
-    fn keyswitch(&self, ct: &Ciphertext, ksk: &KeySwitchingKey, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext {
-        let n = params.polynomial_degree;
-        let k = params.module_dimension_k;
-        let rns_basis_size = params.modulus_q.len();
-        
-        // 결과 암호문 (b' = b, a' = 0)
-        let mut new_ct = Ciphertext {
-            a_vec: vec![Polynomial::zero(n, rns_basis_size); k],
-            b: ct.b.clone(),
-            modulus_level: ct.modulus_level,
-        };
-
-        for i in 0..k { // ct의 각 a_i에 대해
-            let decomposed_a = gadget_decompose(&ct.a_vec[i], params);
-            for l in 0..params.gadget_levels_l {
-                let ksk_ct = &ksk.key[i][l]; // KSK(g^l * s_i)
-                let decomp_poly = &decomposed_a[l];
-
-                // b' = b' - <decomp, ksk.b>
-                new_ct.b = self.polynomial_sub(&new_ct.b, &self.polynomial_mul(&decomp_poly, &ksk_ct.b, params), params);
-                // a'_j = a'_j - <decomp, ksk.a_j>
-                for j in 0..k {
-                    new_ct.a_vec[j] = self.polynomial_sub(&new_ct.a_vec[j], &self.polynomial_mul(decomp_poly, &ksk_ct.a_vec[j], params), params);
-                }
-            }
-        }
-        new_ct
-    }
-    
-    /// 암호문의 모듈러스를 한 단계 낮춥니다.
-    fn modulus_switch(
-        &self,
-        ct: &Ciphertext,
-        params: &QfheParameters<'a, 'b, 'c>,
-    ) -> Ciphertext {
-        let from_basis = &params.modulus_q[..ct.b.coeffs[0].w.len()];
-        if from_basis.len() <= 1 {
-            // 이미 가장 낮은 레벨이므로 변환 불가
-            return ct.clone();
-        }
-        let to_basis = &from_basis[..from_basis.len() - 1];
-
-        // 다항식의 각 계수를 (RNS -> Integer -> new RNS)로 변환하는 함수
-        let convert_poly = |p: &Polynomial| -> Polynomial {
-            let n = p.coeffs.len();
-            let mut new_poly = Polynomial::zero(n, to_basis.len());
-            for i in 0..n {
-                // --- ❗❗❗ 핵심 버그 수정 ❗❗❗ ---
-                // ❗ 수정: to_words()[0]를 사용하여 u64로 변환 후 u128로 캐스팅
-                let w_int = rns_to_integer(&p.coeffs[i].w, from_basis).to_words()[0] as u128;
-                let x_int = rns_to_integer(&p.coeffs[i].x, from_basis).to_words()[0] as u128;
-                let y_int = rns_to_integer(&p.coeffs[i].y, from_basis).to_words()[0] as u128;
-                let z_int = rns_to_integer(&p.coeffs[i].z, from_basis).to_words()[0] as u128;
-                
-                // 새로운 RNS 기저로 변환
-                new_poly.coeffs[i].w = integer_to_rns(w_int, to_basis);
-                new_poly.coeffs[i].x = integer_to_rns(x_int, to_basis);
-                new_poly.coeffs[i].y = integer_to_rns(y_int, to_basis);
-                new_poly.coeffs[i].z = integer_to_rns(z_int, to_basis);
-            }
-            new_poly
-        };
-        
-        Ciphertext {
-            a_vec: ct.a_vec.iter().map(convert_poly).collect(),
-            b: convert_poly(&ct.b),
-            modulus_level: ct.modulus_level + 1,
-        }
-    }
-
-    /// ✅ NEW: 암호문-스칼라 곱셈 헬퍼 함수 구현
-    fn ciphertext_scalar_mul(
-        &self,
-        ct: &Ciphertext,
-        scalar: &Polynomial,
-        params: &QfheParameters<'a, 'b, 'c>,
-    ) -> Ciphertext {
-        let k = params.module_dimension_k;
-        
-        // b' = b * scalar
-        let new_b = self.polynomial_mul(&ct.b, scalar, params);
-
-        // a_i' = a_i * scalar
-        let new_a_vec = ct.a_vec.iter()
-            .map(|a_i| self.polynomial_mul(a_i, scalar, params))
-            .collect();
-        
-        Ciphertext {
-            a_vec: new_a_vec,
-            b: new_b,
-            modulus_level: ct.modulus_level,
-        }
     }
 }

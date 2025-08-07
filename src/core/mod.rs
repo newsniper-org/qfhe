@@ -5,7 +5,8 @@ pub mod polynomial;
 pub use crate::core::polynomial::Polynomial;
 
 pub mod keys;
-pub use crate::core::keys::{SecretKey, RelinearizationKey, KeySwitchingKey, BootstrapKey, PublicKey, MasterKey, Salt, generate_keys};
+// ✅ RLWE: EvaluationKey를 새로 추가하고 KeySwitchingKey를 대체합니다.
+pub use crate::core::keys::generate_keys;
 
 use crate::ntt::{power, primitive_root, BarrettReducer64};
 
@@ -25,16 +26,15 @@ pub use crate::core::consts::{n1024, n2048};
 pub mod num;
 pub use crate::core::num::{SafeModuloArith, concat64x2};
 
-use crypto_bigint::U256;
-
 pub(crate) mod wide_arith;
 pub(crate) use crate::core::wide_arith::WideningArith;
 
 use serde::{Serialize, Deserialize};
 
 /// C FFI에서 사용할 보안 수준 열거형입니다.
-#[repr(C)]
+/// 
 #[derive(Debug, Clone, Copy)]
+#[repr(C)]
 pub enum SecurityLevel {
     L128,
     L160,
@@ -235,52 +235,24 @@ impl SecurityLevel {
     }
 }
 
-
-
-/// LWE 암호문은 (a, b) 쌍으로 구성됩니다.
-/// a는 4원수들의 벡터이고, b는 단일 4원수입니다.
+/// ✅ RLWE: 암호문은 (c0, c1) 쌍으로 구성됩니다.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Ciphertext {
-    pub a_vec: Vec<Polynomial>, // k개의 다항식 벡터
-    pub b: Polynomial,          // 1개의 다항식
-    pub modulus_level: usize,   // 현재 모듈러스 레벨 추적 필드
+    pub c0: Polynomial,
+    pub c1: Polynomial,
+    pub modulus_level: usize,
 }
 
 /// GGSW 암호문은 부트스트래핑의 핵심 요소입니다.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GgswCiphertext {
     pub levels: Vec<Ciphertext>,
 }
-
-impl Serialize for GgswCiphertext {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer {
-        self.levels.serialize::<S>(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for GgswCiphertext {
-    fn deserialize<D>(deserializer: D) -> Result<Self, <D as serde::Deserializer<'de>>::Error>
-    where
-        D: serde::Deserializer<'de> {
-        let result = Vec::<Ciphertext>::deserialize::<D>(deserializer);
-        if let Ok(levels) = result {
-            Ok(Self { levels })
-        } else {
-            let err = result.err().unwrap();
-            Err(err)
-        }
-    }
-}
-
-
 
 /// 암호화, 복호화, 동형 연산을 위한 핵심 트레이트(trait)입니다.
 pub trait EncryptionEngine {
     fn encrypt(&self, message: u64) -> Ciphertext;
 }
-
 
 pub trait DecryptionEngine {
     fn decrypt(&self, ciphertext: &Ciphertext) -> u64;
@@ -289,9 +261,8 @@ pub trait DecryptionEngine {
 pub trait EvaluationEngine {
     fn homomorphic_add(&self, ct1: &Ciphertext, ct2: &Ciphertext) -> Ciphertext;
     fn homomorphic_sub(&self, ct1: &Ciphertext, ct2: &Ciphertext) -> Ciphertext;
-
     fn homomorphic_mul(&self, ct1: &Ciphertext, ct2: &Ciphertext) -> Ciphertext;
+    fn homomorphic_conjugate(&self, ct: &Ciphertext) -> Ciphertext; // 예시 오토모피즘 연산
     fn bootstrap(&self, ct: &Ciphertext, test_poly: &Polynomial) -> Ciphertext;
-
     fn modulus_switch(&self, ct: &Ciphertext) -> Ciphertext;
 }

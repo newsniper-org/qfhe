@@ -25,7 +25,7 @@ endif
 
 # C source and executable
 C_PATH := /usr/lib/gcc/x86_64-redhat-linux/15/include/
-C_DEMOS := 01_generate_keys 02_encrypt 03_decrypt 04_add 05_sub 06_mul
+C_DEMOS := 01_generate_keys 02_encrypt 03_decrypt 04_add 05_mul 06_bootstrap
 C_EXECUTABLES := $(C_DEMOS)
 
 # Python 3 executable
@@ -33,7 +33,7 @@ PYTHON3_EXECUTABLE := pypy
 
 .PHONY: all build run clean
 
-all: build run
+all: demo
 
 src/core/ntt_tables.rs:
 	$(PYTHON3_EXECUTABLE) devutils/gen_ntt_params.py
@@ -52,55 +52,36 @@ $(LIB_PATH): src/lib.rs src/core/mod.rs src/hal/mod.rs src/ffi.rs Cargo.toml bui
 	CPATH="$(C_PATH)" cargo build
 	@echo "Rust library '$(LIB_NAME)' built."
 
-# Run the C executable
-run-01:
+# A full demonstration flow
+demo: build
 	@mkdir -p demo_output
-	@echo "\n--- Running Demo ---"
+	@echo "\n--- 1. Generating Keys ---"
 	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/debug/01_generate_keys ./bin/debug/01_generate_keys
-	@echo "--- End of Demo ---"
-
-run-02:
-	@echo "\n--- Running Demo with input 42 and 100 (1/2)---"
-	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/debug/02_encrypt ./bin/debug/02_encrypt demo_output/qfhe128.pub 42 demo_output/ct_42.ct
-	@echo "\n--- Running Demo with input 42 and 100 (2/2)---"
-	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/debug/02_encrypt ./bin/debug/02_encrypt demo_output/qfhe128.pub 100 demo_output/ct_100.ct
-	@echo "--- End of Demo ---"
-
-run-03-add:
-	@echo "\n--- Running Demo with input 100 + 42 ---"
-	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/debug/03_decrypt ./bin/debug/03_decrypt demo_output/ct_100_add_42.ct demo_output/qfhe128.prv
-	@echo "--- End of Demo ---"
-
-run-03-sub:
-	@echo "\n--- Running Demo with input 100 - 42 ---"
-	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/debug/03_decrypt ./bin/debug/03_decrypt demo_output/ct_100_sub_42.ct demo_output/qfhe128.prv
-	@echo "--- End of Demo ---"
-
-run-03-mul:
-	@echo "\n--- Running Demo with input 100 * 42 ---"
-	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/debug/03_decrypt ./bin/debug/03_decrypt demo_output/ct_100_mul_42.ct demo_output/qfhe128.prv
-	@echo "--- End of Demo ---"
-
-run-04:
-	@echo "\n--- Running Demo: 100 + 42 ---"
-	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/debug/04_add ./bin/debug/04_add demo_output/ct_100.ct demo_output/ct_42.ct demo_output/ct_100_add_42.ct
-	@echo "--- End of Demo ---"
-
-run-05:
-	@echo "\n--- Running Demo: 100 - 42 ---"
-	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/debug/05_sub ./bin/debug/05_sub demo_output/ct_100.ct demo_output/ct_42.ct demo_output/ct_100_sub_42.ct
-	@echo "--- End of Demo ---"
-
-run-06:
-	@echo "\n--- Running Demo: 100 * 42 ---"
-	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/debug/06_mul ./bin/debug/06_mul demo_output/ct_100.ct demo_output/ct_42.ct demo_output/ct_100_mul_42.ct
-	@echo "--- End of Demo ---"
+	@echo "\n--- 2. Encrypting 42 and 10 ---"
+	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/debug/02_encrypt ./bin/debug/02_encrypt demo_output/qfhe128.pk 42 demo_output/ct_42.ct
+	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/debug/02_encrypt ./bin/debug/02_encrypt demo_output/qfhe128.pk 10 demo_output/ct_10.ct
+	@echo "\n--- 3. Decrypting 42 to verify ---"
+	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/debug/03_decrypt ./bin/debug/03_decrypt demo_output/ct_42.ct demo_output/qfhe128.sk
+	@echo "\n--- 4. Homomorphic Addition (42 + 10 = 52) ---"
+	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/debug/04_add ./bin/debug/04_add demo_output/ct_42.ct demo_output/ct_10.ct demo_output/ct_add_52.ct
+	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/debug/03_decrypt ./bin/debug/03_decrypt demo_output/ct_add_52.ct demo_output/qfhe128.sk
+	@echo "\n--- 5. Homomorphic Multiplication (52 * 10 = 520) ---"
+	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/debug/05_mul ./bin/debug/05_mul demo_output/ct_add_52.ct demo_output/ct_10.ct demo_output/qfhe128.rlk demo_output/ct_mul_520.ct
+	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/debug/03_decrypt ./bin/debug/03_decrypt demo_output/ct_mul_520.ct demo_output/qfhe128.sk
+	@echo "\n--- 6. Bootstrapping (f(520) = 2*520 = 1040) ---"
+	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/debug/06_bootstrap ./bin/debug/06_bootstrap demo_output/ct_mul_520.ct demo_output/qfhe128.sk demo_output/qfhe128.bk demo_output/ct_pbs_1040.ct
 
 # Clean up build artifacts
-clean:
-	@echo "Cleaning up build artifacts..."
+clean-bin:
+	@echo "Cleaning up bin/debug ..."
 	@cargo clean
-	$(foreach demo,$(C_DEMOS), \
-		rm -f bin/debug/$(demo) \
-	)
+	@rm -rf bin/debug
 	@echo "Cleanup complete."
+
+# Clean up demonstration outputs.
+clean-output:
+	@echo "Cleaning up demo_output ..."
+	@rm -rf demo_output
+	@echo "Cleanup complete."
+
+clean: clean-output clean-bin
