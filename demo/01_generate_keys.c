@@ -8,7 +8,7 @@
 #define GENERATE_AND_SAVE_KEY(key_ptr, key_type_enum, level, level_num, suffix) \
     do { \
         char filename[64]; \
-        sprintf(filename, "qfhe%d.%s", level_num, suffix); \
+        sprintf(filename, "demo_output/qfhe%d.%s", level_num, suffix); \
         if (qfhe_serialize_key_to_file((const void*)key_ptr, key_type_enum, level, filename) == 0) { \
             printf(" -> %s saved.\n", filename); \
         } else { \

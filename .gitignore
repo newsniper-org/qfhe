@@ -10,3 +10,5 @@ src/core/ntt_tables.rs
 src/core/consts/ntt_tables.rs
 
 bin/*
+
+demo_output/*

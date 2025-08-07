@@ -36,20 +36,17 @@ fn sample_discrete_gaussian(noise_std_dev: f64) -> i128 {
 // #region 결정론적 샘플링 헬퍼 함수
 
 /// CSPRNG를 사용하여 균등 분포에서 다항식을 샘플링합니다.
-fn sample_uniform_poly(n: usize, rns_size: usize, rng: &mut ChaCha20Rng) -> Polynomial {
+fn sample_uniform_poly(n: usize, rns_size: usize, rng: &mut ChaCha20Rng, params: &QfheParameters) -> Polynomial {
     let mut poly = Polynomial::zero(n, rns_size);
     let mut buffer = [0u8; 8];
     for i in 0..n {
         for j in 0..rns_size {
-            // 모든 쿼터니언 성분에 무작위 값을 채웁니다.
-            rng.fill_bytes(&mut buffer);
-            poly.coeffs[i].w[j] = u64::from_le_bytes(buffer);
-            rng.fill_bytes(&mut buffer);
-            poly.coeffs[i].x[j] = u64::from_le_bytes(buffer);
-            rng.fill_bytes(&mut buffer);
-            poly.coeffs[i].y[j] = u64::from_le_bytes(buffer);
-            rng.fill_bytes(&mut buffer);
-            poly.coeffs[i].z[j] = u64::from_le_bytes(buffer);
+            let q_j = params.modulus_q[j];
+            // --- ❗❗❗ 핵심 버그 수정: 아키텍처 독립적인 .gen() 사용 ❗❗❗ ---
+            poly.coeffs[i].w[j] = rng.r#gen::<u64>() % q_j;
+            poly.coeffs[i].x[j] = rng.r#gen::<u64>() % q_j;
+            poly.coeffs[i].y[j] = rng.r#gen::<u64>() % q_j;
+            poly.coeffs[i].z[j] = rng.r#gen::<u64>() % q_j;
         }
     }
     poly
@@ -100,7 +97,7 @@ fn encrypt_internal(
     let rns_size = params.modulus_q.len();
     let backend = CpuBackend;
 
-    let a_vec = (0..k).map(|_| sample_uniform_poly(n, rns_size, rng)).collect::<Vec<_>>();
+    let a_vec = (0..k).map(|_| sample_uniform_poly(n, rns_size, rng, params)).collect::<Vec<_>>();
     let e_poly = sample_gaussian_poly(n, rns_size, params.noise_std_dev, rng, params);
     
     let mut as_poly = Polynomial::zero(n, rns_size);
@@ -284,7 +281,7 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
         let rns_size = params.modulus_q.len();
 
         // a: 무작위 다항식 벡터 생성
-        let a_vec = (0..k).map(|_| sample_uniform_poly(n, rns_size, rng)).collect::<Vec<_>>();
+        let a_vec = (0..k).map(|_| sample_uniform_poly(n, rns_size, rng, params)).collect::<Vec<_>>();
         
         // e: 작은 오차 다항식 생성
         let e = sample_gaussian_poly(n, rns_size, params.noise_std_dev, rng, params);

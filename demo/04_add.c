@@ -17,9 +17,9 @@ int main(int argc, char* argv[]) {
     Ciphertext* ct2 = qfhe_deserialize_ciphertext_from_json_str(ct2_json);
 
     // 2. 연산에 필요한 모든 키 파일 읽기
-    char* rlk_json = read_file_to_string("qfhe128.rlk");
-    char* bk_json = read_file_to_string("qfhe128.bk");
-    char* ksk_json = read_file_to_string("qfhe128.ksk");
+    char* rlk_json = read_file_to_string("demo_output/qfhe128.rlk");
+    char* bk_json = read_file_to_string("demo_output/qfhe128.bk");
+    char* ksk_json = read_file_to_string("demo_output/qfhe128.ksk");
     RelinearizationKey* rlk = qfhe_deserialize_rlk_from_json_str(rlk_json);
     BootstrapKey* bk = qfhe_deserialize_bk_from_json_str(bk_json);
     KeySwitchingKey* ksk = qfhe_deserialize_ksk_from_json_str(ksk_json);

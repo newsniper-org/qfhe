@@ -25,9 +25,9 @@ int main(int argc, char* argv[]) {
     }
 
     // 2. 연산에 필요한 모든 키 파일 읽기 (곱셈에는 특히 rlk가 중요)
-    char* rlk_json = read_file_to_string("qfhe128.rlk");
-    char* bk_json = read_file_to_string("qfhe128.bk");
-    char* ksk_json = read_file_to_string("qfhe128.ksk");
+    char* rlk_json = read_file_to_string("demo_output/qfhe128.rlk");
+    char* bk_json = read_file_to_string("demo_output/qfhe128.bk");
+    char* ksk_json = read_file_to_string("demo_output/qfhe128.ksk");
 
     // 3. JSON 문자열로부터 Rust 객체 역직렬화
     Ciphertext* ct1 = qfhe_deserialize_ciphertext_from_json_str(ct1_json);

@@ -63,6 +63,7 @@ pub fn qntt_pointwise_mul(p1: &mut Polynomial, p2: &Polynomial, params: &QfhePar
     p1.coeffs.par_iter_mut().zip(p2.coeffs.par_iter()).for_each(|(p1_coeff, p2_coeff)| {
         for i in 0..rns_basis_size {
             let q = params.modulus_q[i];
+            let reducer = &params.reducers[i];
             
             // c1a, c2a, c1b, c2b (split)
             let c1a_w = p1_coeff.w[i];
@@ -79,34 +80,45 @@ pub fn qntt_pointwise_mul(p1: &mut Polynomial, p2: &Polynomial, params: &QfhePar
             let c1b_conj_x = q - c1b_x;
             let c2b_conj_x = q - c2b_x;
 
-            // --- c1_res = c1a*c1b - c2a*c2b_conj ---
+            // --- ❗❗❗ 핵심 버그 수정: 모든 연산을 안전한 모듈러 연산으로 교체 ❗❗❗ ---
             // term1 = c1a * c1b
-            let t1_w_a = params.reducers[i].reduce(concat64x2(c1a_w.widening_mul(c1b_w)));
-            let t1_w_b = params.reducers[i].reduce(concat64x2(c1a_x.widening_mul(c1b_x)));
+            let t1_w_a = reducer.reduce(concat64x2(c1a_w.widening_mul(c1b_w)));
+            let t1_w_b = reducer.reduce(concat64x2(c1a_x.widening_mul(c1b_x)));
             let term1_w = t1_w_a.safe_sub_mod(t1_w_b, q);
-            let term1_x = params.reducers[i].reduce(concat64x2(c1a_w.widening_mul(c1b_x)) + concat64x2(c1a_x.widening_mul(c1b_w)));
+            
+            let t1_x_a = reducer.reduce(concat64x2(c1a_w.widening_mul(c1b_x)));
+            let t1_x_b = reducer.reduce(concat64x2(c1a_x.widening_mul(c1b_w)));
+            let term1_x = t1_x_a.safe_add_mod(t1_x_b, q);
 
             // term2 = c2a * c2b_conj
-            let t2_w_a = params.reducers[i].reduce(concat64x2(c2a_w.widening_mul(c2b_w)));
-            let t2_w_b = params.reducers[i].reduce(concat64x2(c2a_x.widening_mul(c2b_conj_x)));
+            let t2_w_a = reducer.reduce(concat64x2(c2a_w.widening_mul(c2b_w)));
+            let t2_w_b = reducer.reduce(concat64x2(c2a_x.widening_mul(c2b_conj_x)));
             let term2_w = t2_w_a.safe_sub_mod(t2_w_b, q);
-            let term2_x = params.reducers[i].reduce(concat64x2(c2a_w.widening_mul(c2b_conj_x)) + concat64x2(c2a_x.widening_mul(c2b_w)));
             
+            let t2_x_a = reducer.reduce(concat64x2(c2a_w.widening_mul(c2b_conj_x)));
+            let t2_x_b = reducer.reduce(concat64x2(c2a_x.widening_mul(c2b_w)));
+            let term2_x = t2_x_a.safe_add_mod(t2_x_b, q);
+
             let res_c1_w = term1_w.safe_sub_mod(term2_w, q);
             let res_c1_x = term1_x.safe_sub_mod(term2_x, q);
             
-            // --- c2_res = c1a*c2b + c2a*c1b_conj ---
             // term3 = c1a * c2b
-            let t3_w_a = params.reducers[i].reduce(concat64x2(c1a_w.widening_mul(c2b_w)));
-            let t3_w_b = params.reducers[i].reduce(concat64x2(c1a_x.widening_mul(c2b_x)));
+            let t3_w_a = reducer.reduce(concat64x2(c1a_w.widening_mul(c2b_w)));
+            let t3_w_b = reducer.reduce(concat64x2(c1a_x.widening_mul(c2b_x)));
             let term3_w = t3_w_a.safe_sub_mod(t3_w_b, q);
-            let term3_x = params.reducers[i].reduce(concat64x2(c1a_w.widening_mul(c2b_x)) + concat64x2(c1a_x.widening_mul(c2b_w)));
-            
+
+            let t3_x_a = reducer.reduce(concat64x2(c1a_w.widening_mul(c2b_x)));
+            let t3_x_b = reducer.reduce(concat64x2(c1a_x.widening_mul(c2b_w)));
+            let term3_x = t3_x_a.safe_add_mod(t3_x_b, q);
+
             // term4 = c2a * c1b_conj
-            let t4_w_a = params.reducers[i].reduce(concat64x2(c2a_w.widening_mul(c1b_w)));
-            let t4_w_b = params.reducers[i].reduce(concat64x2(c2a_x.widening_mul(c1b_conj_x)));
+            let t4_w_a = reducer.reduce(concat64x2(c2a_w.widening_mul(c1b_w)));
+            let t4_w_b = reducer.reduce(concat64x2(c2a_x.widening_mul(c1b_conj_x)));
             let term4_w = t4_w_a.safe_sub_mod(t4_w_b, q);
-            let term4_x = params.reducers[i].reduce(concat64x2(c2a_w.widening_mul(c1b_conj_x)) + concat64x2(c2a_x.widening_mul(c1b_w)));
+
+            let t4_x_a = reducer.reduce(concat64x2(c2a_w.widening_mul(c1b_conj_x)));
+            let t4_x_b = reducer.reduce(concat64x2(c2a_x.widening_mul(c1b_w)));
+            let term4_x = t4_x_a.safe_add_mod(t4_x_b, q);
 
             let res_c2_w = term3_w.safe_add_mod(term4_w, q);
             let res_c2_x = term3_x.safe_add_mod(term4_x, q);

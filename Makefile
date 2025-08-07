@@ -54,45 +54,46 @@ $(LIB_PATH): src/lib.rs src/core/mod.rs src/hal/mod.rs src/ffi.rs Cargo.toml bui
 
 # Run the C executable
 run-01:
+	@mkdir -p demo_output
 	@echo "\n--- Running Demo ---"
 	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/01_generate_keys ./bin/01_generate_keys
 	@echo "--- End of Demo ---"
 
 run-02:
 	@echo "\n--- Running Demo with input 42 and 100 (1/2)---"
-	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/02_encrypt ./bin/02_encrypt qfhe128.pub 42 ct_42.ct
+	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/02_encrypt ./bin/02_encrypt demo_output/qfhe128.pub 42 demo_output/ct_42.ct
 	@echo "\n--- Running Demo with input 42 and 100 (2/2)---"
-	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/02_encrypt ./bin/02_encrypt qfhe128.pub 100 ct_100.ct
+	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/02_encrypt ./bin/02_encrypt demo_output/qfhe128.pub 100 demo_output/ct_100.ct
 	@echo "--- End of Demo ---"
 
 run-03-add:
 	@echo "\n--- Running Demo with input 100 + 42 ---"
-	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/03_decrypt ./bin/03_decrypt ct_100_add_42.ct qfhe128.prv
+	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/03_decrypt ./bin/03_decrypt demo_output/ct_100_add_42.ct demo_output/qfhe128.prv
 	@echo "--- End of Demo ---"
 
 run-03-sub:
 	@echo "\n--- Running Demo with input 100 - 42 ---"
-	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/03_decrypt ./bin/03_decrypt ct_100_sub_42.ct qfhe128.prv
+	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/03_decrypt ./bin/03_decrypt demo_output/ct_100_sub_42.ct demo_output/qfhe128.prv
 	@echo "--- End of Demo ---"
 
 run-03-mul:
 	@echo "\n--- Running Demo with input 100 * 42 ---"
-	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/03_decrypt ./bin/03_decrypt ct_100_mul_42.ct qfhe128.prv
+	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/03_decrypt ./bin/03_decrypt demo_output/ct_100_mul_42.ct demo_output/qfhe128.prv
 	@echo "--- End of Demo ---"
 
 run-04:
 	@echo "\n--- Running Demo: 100 + 42 ---"
-	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/04_add ./bin/04_add ct_100.ct ct_42.ct ct_100_add_42.ct
+	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/04_add ./bin/04_add demo_output/ct_100.ct demo_output/ct_42.ct demo_output/ct_100_add_42.ct
 	@echo "--- End of Demo ---"
 
 run-05:
 	@echo "\n--- Running Demo: 100 - 42 ---"
-	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/05_sub ./bin/05_sub ct_100.ct ct_42.ct ct_100_sub_42.ct
+	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/05_sub ./bin/05_sub demo_output/ct_100.ct demo_output/ct_42.ct demo_output/ct_100_sub_42.ct
 	@echo "--- End of Demo ---"
 
 run-06:
 	@echo "\n--- Running Demo: 100 * 42 ---"
-	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/06_mul ./bin/06_mul ct_100.ct ct_42.ct ct_100_mul_42.ct
+	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/06_mul ./bin/06_mul demo_output/ct_100.ct demo_output/ct_42.ct demo_output/ct_100_mul_42.ct
 	@echo "--- End of Demo ---"
 
 # Clean up build artifacts
