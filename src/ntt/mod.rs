@@ -4,6 +4,8 @@ use crate::core::{Polynomial, Quaternion, QfheParameters, SafeModuloArith};
 use crate::core::wide_arith::WideningArith;
 use rayon::prelude::*;
 
+use crate::core::consts::ntt_tables::{n2048, n4096, n8192};
+
 pub mod qntt;
 use crate::core::concat64x2;
 
@@ -172,104 +174,131 @@ impl SoaPolynomial {
     }
 }
 
-pub trait Ntt<'a, 'b, 'c> {
-    fn ntt_forward(&mut self, params: &QfheParameters<'a, 'b, 'c>);
-    fn ntt_inverse(&mut self, params: &QfheParameters<'a, 'b, 'c>);
+pub trait Ntt<'a> {
+    fn ntt_forward(&mut self, params: &QfheParameters<'a>);
+    fn ntt_inverse(&mut self, params: &QfheParameters<'a>);
 }
 
-impl<'a, 'b, 'c> Ntt<'a, 'b, 'c> for Polynomial {
-    fn ntt_forward(&mut self, params: &QfheParameters<'a, 'b, 'c>) {
+impl<'a> Ntt<'a> for Polynomial {
+    fn ntt_forward(&mut self, params: &QfheParameters<'a>) {
         let n = params.polynomial_degree;
         let rns_basis_size = params.modulus_q.len();
 
         let mut soa_poly = SoaPolynomial::from_aos(self, rns_basis_size);
 
-        rayon::scope(|s| {
-            s.spawn(|_| {
-                soa_poly.w.par_iter_mut().enumerate().for_each(|(i, w_plane)| {
-                    let q = params.modulus_q[i];
-                    let root = primitive_root(q);
-                    let w_primitive = power(root, (q - 1) / n as u64, q);
-                    ntt_cooley_tukey_radix4(w_plane, n, q, w_primitive, &params.reducers[i]);
-                });
+        let process_plane = |plane: &mut Vec<Vec<u64>>, w_primitives: &[u64]| {
+            plane.par_iter_mut().enumerate().for_each(|(i, p)| {
+                ntt_cooley_tukey_radix4(p, n, params.modulus_q[i], w_primitives[i], &params.reducers[i]);
             });
-            s.spawn(|_| {
-                soa_poly.x.par_iter_mut().enumerate().for_each(|(i, x_plane)| {
-                    let q = params.modulus_q[i];
-                    let root = primitive_root(q);
-                    let w_primitive = power(root, (q - 1) / n as u64, q);
-                    ntt_cooley_tukey_radix4(x_plane, n, q, w_primitive, &params.reducers[i]);
+        };
+
+        match n {
+            2048 => rayon::scope(|s| {
+                s.spawn(|_| {
+                    process_plane(&mut soa_poly.w, &[n2048::W_PRIMITIVE_0, n2048::W_PRIMITIVE_1]);
                 });
-            });
-            s.spawn(|_| {
-                soa_poly.y.par_iter_mut().enumerate().for_each(|(i, y_plane)| {
-                    let q = params.modulus_q[i];
-                    let root = primitive_root(q);
-                    let w_primitive = power(root, (q - 1) / n as u64, q);
-                    ntt_cooley_tukey_radix4(y_plane, n, q, w_primitive, &params.reducers[i]);
+                s.spawn(|_| {
+                    process_plane(&mut soa_poly.x, &[n2048::W_PRIMITIVE_0, n2048::W_PRIMITIVE_1]);
                 });
-            });
-            s.spawn(|_| {
-                soa_poly.z.par_iter_mut().enumerate().for_each(|(i, z_plane)| {
-                    let q = params.modulus_q[i];
-                    let root = primitive_root(q);
-                    let w_primitive = power(root, (q - 1) / n as u64, q);
-                    ntt_cooley_tukey_radix4(z_plane, n, q, w_primitive, &params.reducers[i]);
+                s.spawn(|_| {
+                    process_plane(&mut soa_poly.y, &[n2048::W_PRIMITIVE_0, n2048::W_PRIMITIVE_1]);
                 });
-            });
-        });
+                s.spawn(|_| {
+                    process_plane(&mut soa_poly.z, &[n2048::W_PRIMITIVE_0, n2048::W_PRIMITIVE_1]);
+                });
+            }),
+            4096 => {
+                s.spawn(|_| {
+                    process_plane(&mut soa_poly.w, &[n4096::W_PRIMITIVE_0, n4096::W_PRIMITIVE_1, n4096::W_PRIMITIVE_2, n4096::W_PRIMITIVE_3]);
+                });
+                s.spawn(|_| {
+                    process_plane(&mut soa_poly.x, &[n4096::W_PRIMITIVE_0, n4096::W_PRIMITIVE_1, n4096::W_PRIMITIVE_2, n4096::W_PRIMITIVE_3]);
+                });
+                s.spawn(|_| {
+                    process_plane(&mut soa_poly.y, &[n4096::W_PRIMITIVE_0, n4096::W_PRIMITIVE_1, n4096::W_PRIMITIVE_2, n4096::W_PRIMITIVE_3]);
+                });
+                s.spawn(|_| {
+                    process_plane(&mut soa_poly.z, &[n4096::W_PRIMITIVE_0, n4096::W_PRIMITIVE_1, n4096::W_PRIMITIVE_2, n4096::W_PRIMITIVE_3]);
+                });
+            },
+            8192 => {
+                s.spawn(|_| {
+                    process_plane(&mut soa_poly.w, &[n8192::W_PRIMITIVE_0, n8192::W_PRIMITIVE_1, n8192::W_PRIMITIVE_2, n8192::W_PRIMITIVE_3, n8192::W_PRIMITIVE_4, n8192::W_PRIMITIVE_5, n8192::W_PRIMITIVE_6, n8192::W_PRIMITIVE_7]);
+                });
+                s.spawn(|_| {
+                    process_plane(&mut soa_poly.x, &[n8192::W_PRIMITIVE_0, n8192::W_PRIMITIVE_1, n8192::W_PRIMITIVE_2, n8192::W_PRIMITIVE_3, n8192::W_PRIMITIVE_4, n8192::W_PRIMITIVE_5, n8192::W_PRIMITIVE_6, n8192::W_PRIMITIVE_7]);
+                });
+                s.spawn(|_| {
+                    process_plane(&mut soa_poly.y, &[n8192::W_PRIMITIVE_0, n8192::W_PRIMITIVE_1, n8192::W_PRIMITIVE_2, n8192::W_PRIMITIVE_3, n8192::W_PRIMITIVE_4, n8192::W_PRIMITIVE_5, n8192::W_PRIMITIVE_6, n8192::W_PRIMITIVE_7]);
+                });
+                s.spawn(|_| {
+                    process_plane(&mut soa_poly.z, &[n8192::W_PRIMITIVE_0, n8192::W_PRIMITIVE_1, n8192::W_PRIMITIVE_2, n8192::W_PRIMITIVE_3, n8192::W_PRIMITIVE_4, n8192::W_PRIMITIVE_5, n8192::W_PRIMITIVE_6, n8192::W_PRIMITIVE_7]);
+                });
+            },
+            _ => unimplemented!("NTT is not supported for polynomial degree: {}", n),
+        }
 
         *self = soa_poly.to_aos(n, rns_basis_size);
     }
 
-    fn ntt_inverse(&mut self, params: &QfheParameters<'a, 'b, 'c>) {
+    fn ntt_inverse(&mut self, params: &QfheParameters<'a>) {
         let n = params.polynomial_degree;
         let rns_basis_size = params.modulus_q.len();
 
         let mut soa_poly = SoaPolynomial::from_aos(self, rns_basis_size);
 
-        rayon::scope(|s| {
-            s.spawn(|_| {
-                soa_poly.w.par_iter_mut().enumerate().for_each(|(i, w_plane)| {
-                    let q = params.modulus_q[i];
-                    let reducer = BarrettReducer64::new(q);
-                    let root = primitive_root(q);
-                    let w_primitive = power(root, (q - 1) / n as u64, q);
-                    let w_inv_primitive = power(w_primitive, q - 2, q);
-                    ntt_cooley_tukey_radix4(w_plane, n, q, w_inv_primitive, &reducer);
-                });
+        let process_plane_inv = |plane: &mut Vec<Vec<u64>>, w_inv_primitives: &[u64]| {
+            plane.par_iter_mut().enumerate().for_each(|(i, p)| {
+                ntt_cooley_tukey_radix4(p, n, params.modulus_q[i], w_inv_primitives[i], &params.reducers[i]);
             });
-            s.spawn(|_| {
-                soa_poly.x.par_iter_mut().enumerate().for_each(|(i, x_plane)| {
-                    let q = params.modulus_q[i];
-                    let reducer = BarrettReducer64::new(q);
-                    let root = primitive_root(q);
-                    let w_primitive = power(root, (q - 1) / n as u64, q);
-                    let w_inv_primitive = power(w_primitive, q - 2, q);
-                    ntt_cooley_tukey_radix4(x_plane, n, q, w_inv_primitive, &reducer);
+        };
+
+        match n {
+            2048 => rayon::scope(|s| {
+                s.spawn(|_| {
+                    process_plane_inv(&mut soa_poly.w, &[n2048::W_INV_PRIMITIVE_0, n2048::W_INV_PRIMITIVE_1]);
                 });
-            });
-            s.spawn(|_| {
-                soa_poly.y.par_iter_mut().enumerate().for_each(|(i, y_plane)| {
-                    let q = params.modulus_q[i];
-                    let reducer = BarrettReducer64::new(q);
-                    let root = primitive_root(q);
-                    let w_primitive = power(root, (q - 1) / n as u64, q);
-                    let w_inv_primitive = power(w_primitive, q - 2, q);
-                    ntt_cooley_tukey_radix4(y_plane, n, q, w_inv_primitive, &reducer);
+                s.spawn(|_| {
+                    process_plane_inv(&mut soa_poly.x, &[n2048::W_INV_PRIMITIVE_0, n2048::W_INV_PRIMITIVE_1]);
                 });
-            });
-            s.spawn(|_| {
-                soa_poly.z.par_iter_mut().enumerate().for_each(|(i, z_plane)| {
-                    let q = params.modulus_q[i];
-                    let reducer = BarrettReducer64::new(q);
-                    let root = primitive_root(q);
-                    let w_primitive = power(root, (q - 1) / n as u64, q);
-                    let w_inv_primitive = power(w_primitive, q - 2, q);
-                    ntt_cooley_tukey_radix4(z_plane, n, q, w_inv_primitive, &reducer);
+                s.spawn(|_| {
+                    process_plane_inv(&mut soa_poly.y, &[n2048::W_INV_PRIMITIVE_0, n2048::W_INV_PRIMITIVE_1]);
                 });
-            });
-        });
+                s.spawn(|_| {
+                    process_plane_inv(&mut soa_poly.z, &[n2048::W_INV_PRIMITIVE_0, n2048::W_INV_PRIMITIVE_1]);
+                });
+            }),
+            4096 => rayon::scope(|s| {
+                s.spawn(|_| {
+                    process_plane_inv(&mut soa_poly.w, &[n4096::W_INV_PRIMITIVE_0, n4096::W_INV_PRIMITIVE_1, n4096::W_INV_PRIMITIVE_2, n4096::W_INV_PRIMITIVE_3]);
+                });
+                s.spawn(|_| {
+                    process_plane_inv(&mut soa_poly.x, &[n4096::W_INV_PRIMITIVE_0, n4096::W_INV_PRIMITIVE_1, n4096::W_INV_PRIMITIVE_2, n4096::W_INV_PRIMITIVE_3]);
+                });
+                s.spawn(|_| {
+                    process_plane_inv(&mut soa_poly.y, &[n4096::W_INV_PRIMITIVE_0, n4096::W_INV_PRIMITIVE_1, n4096::W_INV_PRIMITIVE_2, n4096::W_INV_PRIMITIVE_3]);
+                });
+                s.spawn(|_| {
+                    process_plane_inv(&mut soa_poly.z, &[n4096::W_INV_PRIMITIVE_0, n4096::W_INV_PRIMITIVE_1, n4096::W_INV_PRIMITIVE_2, n4096::W_INV_PRIMITIVE_3]);
+                });
+            }),
+            8192 => rayon::scope(|s| {
+                s.spawn(|_| {
+                    process_plane_inv(&mut soa_poly.w, &[n8192::W_INV_PRIMITIVE_0, n8192::W_INV_PRIMITIVE_1, n8192::W_INV_PRIMITIVE_2, n8192::W_INV_PRIMITIVE_3, n8192::W_INV_PRIMITIVE_4, n8192::W_INV_PRIMITIVE_5, n8192::W_INV_PRIMITIVE_6, n8192::W_INV_PRIMITIVE_7]);
+                });
+                s.spawn(|_| {
+                    process_plane_inv(&mut soa_poly.x, &[n8192::W_INV_PRIMITIVE_0, n8192::W_INV_PRIMITIVE_1, n8192::W_INV_PRIMITIVE_2, n8192::W_INV_PRIMITIVE_3, n8192::W_INV_PRIMITIVE_4, n8192::W_INV_PRIMITIVE_5, n8192::W_INV_PRIMITIVE_6, n8192::W_INV_PRIMITIVE_7]);
+                });
+                s.spawn(|_| {
+                    process_plane_inv(&mut soa_poly.y, &[n8192::W_INV_PRIMITIVE_0, n8192::W_INV_PRIMITIVE_1, n8192::W_INV_PRIMITIVE_2, n8192::W_INV_PRIMITIVE_3, n8192::W_INV_PRIMITIVE_4, n8192::W_INV_PRIMITIVE_5, n8192::W_INV_PRIMITIVE_6, n8192::W_INV_PRIMITIVE_7]);
+                });
+                s.spawn(|_| {
+                    process_plane_inv(&mut soa_poly.z, &[n8192::W_INV_PRIMITIVE_0, n8192::W_INV_PRIMITIVE_1, n8192::W_INV_PRIMITIVE_2, n8192::W_INV_PRIMITIVE_3, n8192::W_INV_PRIMITIVE_4, n8192::W_INV_PRIMITIVE_5, n8192::W_INV_PRIMITIVE_6, n8192::W_INV_PRIMITIVE_7]);
+                });
+            }),
+            _ => unimplemented!("NTT is not supported for polynomial degree: {}", n),
+        }
+        
         
         *self = soa_poly.to_aos(n, rns_basis_size);
 

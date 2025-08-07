@@ -54,7 +54,7 @@ pub struct MasterKey(pub [u8; 32]);
 pub struct Salt(pub [u8; 24]);
 
 /// ✅ RLWE: `generate_keys` 함수 구현
-pub fn generate_keys<B : HardwareBackend<'static, 'static, 'static>>(
+pub fn generate_keys<B : HardwareBackend<'static, 'static>>(
     level: SecurityLevel,
     master_key: &MasterKey,
     salt: &Salt,

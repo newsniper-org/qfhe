@@ -77,8 +77,8 @@ fn ciphertext_rotation(ct: &Ciphertext, k: i128, params: &QfheParameters) -> Cip
     }
 }
 
-impl<'a, 'b, 'c> CpuBackend {
-    fn sample_uniform_poly(n: usize, rns_size: usize, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>) -> Polynomial {
+impl<'a> CpuBackend {
+    fn sample_uniform_poly(n: usize, rns_size: usize, rng: &mut ChaCha20Rng, params: &QfheParameters<'a>) -> Polynomial {
         let mut poly = Polynomial::zero(n, rns_size);
         for i in 0..n {
             for j in 0..rns_size {
@@ -92,7 +92,7 @@ impl<'a, 'b, 'c> CpuBackend {
         poly
     }
 
-    fn sample_gaussian_poly(n: usize, rns_size: usize, std_dev: f64, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>) -> Polynomial {
+    fn sample_gaussian_poly(n: usize, rns_size: usize, std_dev: f64, rng: &mut ChaCha20Rng, params: &QfheParameters<'a>) -> Polynomial {
         let mut poly = Polynomial::zero(n, rns_size);
         let handle_noise = |noise: i128| -> Vec<u64> {
             let mut rns_noise = crate::core::rns::integer_to_rns(noise.unsigned_abs(), params.modulus_q);
@@ -132,7 +132,7 @@ impl<'a, 'b, 'c> CpuBackend {
 
 
     /// 내부 암호화 함수 (키 생성에 사용)
-    fn encrypt_internal(&self, msg_poly: &Polynomial, pk: &PublicKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext {
+    fn encrypt_internal(&self, msg_poly: &Polynomial, pk: &PublicKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a>) -> Ciphertext {
         let n = params.polynomial_degree;
         let rns_size = params.modulus_q.len();
 
@@ -151,7 +151,7 @@ impl<'a, 'b, 'c> CpuBackend {
     }
 
     /// ✅ NEW: 다항식의 각 쿼터니언 계수에 켤레 연산을 적용합니다.
-    fn polynomial_conjugate(p: &Polynomial, params: &QfheParameters<'a, 'b, 'c>) -> Polynomial {
+    fn polynomial_conjugate(p: &Polynomial, params: &QfheParameters<'a>) -> Polynomial {
         let n = p.coeffs.len();
         let rns_size = params.modulus_q.len();
         let mut res = Polynomial::zero(n, rns_size);
@@ -169,7 +169,7 @@ impl<'a, 'b, 'c> CpuBackend {
     }
 
     // ✅ NEW: GGSW 암호문과 RLWE 암호문의 외부 곱(External Product)을 계산합니다.
-    fn external_product(&self, ggsw: &GgswCiphertext, rlwe: &Ciphertext, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext {
+    fn external_product(&self, ggsw: &GgswCiphertext, rlwe: &Ciphertext, params: &QfheParameters<'a>) -> Ciphertext {
         let n = params.polynomial_degree;
         let rns_size = params.modulus_q.len();
         let levels = params.gadget_levels_l;
@@ -206,16 +206,16 @@ impl<'a, 'b, 'c> CpuBackend {
     }
 }
 
-impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
+impl<'a> HardwareBackend<'a> for CpuBackend {
     /// ✅ RLWE: 비밀키 s1, s2 생성
-    fn generate_secret_key(&self, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>) -> SecretKey {
+    fn generate_secret_key(&self, rng: &mut ChaCha20Rng, params: &QfheParameters<'a>) -> SecretKey {
         let s1 = Self::sample_ternary_poly(params.polynomial_degree, params.modulus_q.len(), params.modulus_q, rng);
         let s2 = Self::sample_ternary_poly(params.polynomial_degree, params.modulus_q.len(), params.modulus_q, rng);
         SecretKey { s1, s2 }
     }
 
     /// ✅ RLWE: 공개키 (b, a) 생성. b = -a*s1 + e
-    fn generate_public_key(&self, sk: &SecretKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>) -> PublicKey {
+    fn generate_public_key(&self, sk: &SecretKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a>) -> PublicKey {
         let s1 = &sk.s1;
         let n = params.polynomial_degree;
         let rns_size = params.modulus_q.len();
@@ -230,7 +230,7 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
     }
 
     /// ✅ RLWE: 암호화. (c0, c1) = (pk.b*u + e0 + mΔ, pk.a*u + e1)
-    fn encrypt(&self, message: u64, pk: &PublicKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext {
+    fn encrypt(&self, message: u64, pk: &PublicKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a>) -> Ciphertext {
         let n = params.polynomial_degree;
         let rns_size = params.modulus_q.len();
 
@@ -255,7 +255,7 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
     }
 
     /// ✅ RLWE: 복호화. m' = c0 + c1*s1
-    fn decrypt(&self, ciphertext: &Ciphertext, sk: &SecretKey, params: &QfheParameters<'a, 'b, 'c>) -> u64 {
+    fn decrypt(&self, ciphertext: &Ciphertext, sk: &SecretKey, params: &QfheParameters<'a>) -> u64 {
         let s1 = &sk.s1;
         
         // noisy_poly = c0 + c1*s1
@@ -285,21 +285,21 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
     }
 
     /// ✅ RLWE: 동형 덧셈
-    fn homomorphic_add(&self, ct1: &Ciphertext, ct2: &Ciphertext, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext {
+    fn homomorphic_add(&self, ct1: &Ciphertext, ct2: &Ciphertext, params: &QfheParameters<'a>) -> Ciphertext {
         let c0 = self.polynomial_add(&ct1.c0, &ct2.c0, params);
         let c1 = self.polynomial_add(&ct1.c1, &ct2.c1, params);
         Ciphertext { c0, c1, modulus_level: ct1.modulus_level }
     }
 
     /// ✅ RLWE: 동형 뺄셈
-    fn homomorphic_sub(&self, ct1: &Ciphertext, ct2: &Ciphertext, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext {
+    fn homomorphic_sub(&self, ct1: &Ciphertext, ct2: &Ciphertext, params: &QfheParameters<'a>) -> Ciphertext {
         let c0 = self.polynomial_sub(&ct1.c0, &ct2.c0, params);
         let c1 = self.polynomial_sub(&ct1.c1, &ct2.c1, params);
         Ciphertext { c0, c1, modulus_level: ct1.modulus_level }
     }
 
     /// ✅ RLWE: 동형 곱셈 구현 (텐서곱 + 재선형화)
-    fn homomorphic_mul(&self, ct1: &Ciphertext, ct2: &Ciphertext, rlk: &RelinearizationKey, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext {
+    fn homomorphic_mul(&self, ct1: &Ciphertext, ct2: &Ciphertext, rlk: &RelinearizationKey, params: &QfheParameters<'a>) -> Ciphertext {
         let n = params.polynomial_degree;
         let rns_size = params.modulus_q.len();
 
@@ -339,7 +339,7 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
     }
 
     /// ✅ NEW: 동형 켤레 연산 구현
-    fn homomorphic_conjugate(&self, ct: &Ciphertext, evk_conj: &EvaluationKey, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext {
+    fn homomorphic_conjugate(&self, ct: &Ciphertext, evk_conj: &EvaluationKey, params: &QfheParameters<'a>) -> Ciphertext {
         let n = params.polynomial_degree;
         let rns_size = params.modulus_q.len();
         
@@ -377,7 +377,7 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
     }
     
     /// ✅ RLWE: 재선형화 키 생성 구현. RLK = Enc(g^l * s1^2)
-    fn generate_relinearization_key(&self, sk: &SecretKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>) -> RelinearizationKey {
+    fn generate_relinearization_key(&self, sk: &SecretKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a>) -> RelinearizationKey {
         let s1 = &sk.s1;
         let n = params.polynomial_degree;
         let rns_size = params.modulus_q.len();
@@ -407,7 +407,7 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
     }
 
     /// ✅ RLWE: 평가 키(키 스위칭 키) 생성 구현. EVK = Enc_new(g^l * sk_old)
-    fn generate_evaluation_key(&self, old_sk: &Polynomial, new_sk: &SecretKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>) -> EvaluationKey {
+    fn generate_evaluation_key(&self, old_sk: &Polynomial, new_sk: &SecretKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a>) -> EvaluationKey {
         let n = params.polynomial_degree;
         let rns_size = params.modulus_q.len();
         let levels = params.gadget_levels_l;
@@ -436,7 +436,7 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
     }
 
     /// ✅ RLWE: 부트스트래핑 키 생성 구현. BSK = { GGSW(s1_i) }
-    fn generate_bootstrap_key(&self, sk: &SecretKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a, 'b, 'c>) -> BootstrapKey {
+    fn generate_bootstrap_key(&self, sk: &SecretKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a>) -> BootstrapKey {
         let s1 = &sk.s1;
         let n = params.polynomial_degree;
         let rns_size = params.modulus_q.len();
@@ -482,7 +482,7 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
     }
 
     /// ✅ RLWE: 프로그래머블 부트스트래핑 완전 구현
-    fn bootstrap(&self, ct: &Ciphertext, test_poly: &Polynomial, bk: &BootstrapKey, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext {
+    fn bootstrap(&self, ct: &Ciphertext, test_poly: &Polynomial, bk: &BootstrapKey, params: &QfheParameters<'a>) -> Ciphertext {
         let n = params.polynomial_degree;
         let rns_size = params.modulus_q.len();
         let new_modulus = (2 * n) as u64;
@@ -535,7 +535,7 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
     }
 
     /// ✅ RLWE: 키 스위칭 구현
-    fn keyswitch(&self, ct: &Ciphertext, evk: &EvaluationKey, params: &QfheParameters<'a, 'b, 'c>) -> Ciphertext {
+    fn keyswitch(&self, ct: &Ciphertext, evk: &EvaluationKey, params: &QfheParameters<'a>) -> Ciphertext {
         let n = params.polynomial_degree;
         let rns_size = params.modulus_q.len();
 
@@ -595,7 +595,7 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
     }
 
     /// 두 다항식을 더합니다. [RNS 기반, 안전한 모듈러 연산 적용]
-    fn polynomial_add(&self, p1: &Polynomial, p2: &Polynomial, params: &QfheParameters<'a, 'b, 'c>) -> Polynomial {
+    fn polynomial_add(&self, p1: &Polynomial, p2: &Polynomial, params: &QfheParameters<'a>) -> Polynomial {
         let n = params.polynomial_degree;
         let rns_basis_size = params.modulus_q.len();
         let mut res = Polynomial::zero(n, rns_basis_size);
@@ -613,7 +613,7 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
     }
 
     /// 두 다항식을 뺍니다. [RNS 기반, 안전한 모듈러 연산 적용]
-    fn polynomial_sub(&self, p1: &Polynomial, p2: &Polynomial, params: &QfheParameters<'a, 'b, 'c>) -> Polynomial {
+    fn polynomial_sub(&self, p1: &Polynomial, p2: &Polynomial, params: &QfheParameters<'a>) -> Polynomial {
         let n = params.polynomial_degree;
         let rns_basis_size = params.modulus_q.len();
         let mut res = Polynomial::zero(n, rns_basis_size);
@@ -631,7 +631,7 @@ impl<'a, 'b, 'c> HardwareBackend<'a, 'b, 'c> for CpuBackend {
     }
 
     /// 두 다항식을 곱합니다. (QNTT 사용) [RNS 기반]
-    fn polynomial_mul(&self, p1: &Polynomial, p2: &Polynomial, params: &QfheParameters<'a, 'b, 'c>) -> Polynomial {
+    fn polynomial_mul(&self, p1: &Polynomial, p2: &Polynomial, params: &QfheParameters<'a>) -> Polynomial {
         let mut p1_ntt = p1.clone();
         let mut p2_ntt = p2.clone();
 

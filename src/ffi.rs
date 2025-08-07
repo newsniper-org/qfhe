@@ -20,17 +20,17 @@ use serde::{Serialize, de::DeserializeOwned};
 // --- Context Structs ---
 
 pub struct EncryptionContext {
-    params: QfheParameters<'static, 'static, 'static>,
+    params: QfheParameters<'static, 'static>,
     public_key: PublicKey,
 }
 
 pub struct DecryptionContext {
-    params: QfheParameters<'static, 'static, 'static>,
+    params: QfheParameters<'static, 'static>,
     secret_key: SecretKey,
 }
 
 pub struct EvaluationContext {
-    params: QfheParameters<'static, 'static, 'static>,
+    params: QfheParameters<'static, 'static>,
     relinearization_key: Option<Box<RelinearizationKey>>,
     bootstrap_key: Option<Box<BootstrapKey>>,
     evaluation_key_conj: Option<Box<EvaluationKey>>,

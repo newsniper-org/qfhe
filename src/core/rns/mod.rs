@@ -1,78 +1,56 @@
-// newsniper-org/qfhe/qfhe-wip-cpu-simple/src/core/rns.rs
+// src/core/rns/mod.rs
 
 //! RNS 기저(basis)와 관련된 상수들을 정의합니다.
-//! 이 값들은 FHE 표준 및 논문을 참고하여 선정된 예시 NTT 친화 소수(NTT-friendly primes)입니다.
+//! 이 값들은 Homomorphic Encryption Security Standard를 준수하는
+//! RLWE 친화적인 NTT 소수(NTT-friendly primes)들입니다.
 
-// --- L128 Security Level ---
-// 전체 모듈러스 Q ~= 60 bits
-pub const Q_128_BASIS: [u64; 1] = [
-    1152921504606584833, // 60-bit prime
+use crate::ntt::BarrettReducer64;
+
+// --- ✅ NEW (RLWE Standard): 128-bit Security Level (n=2048, logQ ≈ 109) ---
+pub const Q_128_BASIS: [u64; 2] = [
+    36028797018963969,  // 55-bit prime (2^55 - 2^11 + 1)
+    35184371884033,     // 55-bit prime (2^55 - 2^23 + 1) - Example prime
 ];
-pub const MODULUS_CHAIN_128: [u128; 2] = [1125899906842597, 1099511627749];
-
-// --- L160 Security Levels ---
-// 전체 모듈러스 Q ~= 70 bits
-pub const Q_160_BASIS: [u64; 2] = [
-    9223372036854775783, // 63-bit prime
-    13835058055282163713, // 64-bit prime
-];
-pub const MODULUS_CHAIN_160: [u128; 2] = [1152921504606846883, 1125899906842597];
-
-
-// --- L160 & L192 Security Levels ---
-// 전체 모듈러스 Q ~= 70 bits
-pub const Q_192_BASIS: [u64; 2] = [
-    9223372036854775783, // 63-bit prime
-    13835058055282163713, // 64-bit prime
-];
-pub const MODULUS_CHAIN_192: [u128; 2] = [1152921504606846883, 1125899906842597];
-
-
-// --- L224 Security Level ---
-// 전체 모듈러스 Q ~= 125 bits
-pub const Q_224_BASIS: [u64; 2] = [
-    9223372036854775783,  // 63-bit prime
-    18446744073709551557, // 64-bit prime
-];
-pub const MODULUS_CHAIN_224: [u128; 2] = [
-    340282366920938463463374607431768210431, // ~128-bit
-    170141183460469231731687303715884105727, // ~127-bit
+pub const REDUCERS_128: [BarrettReducer64; 2] = [
+    BarrettReducer64::new(Q_128_BASIS[0]),
+    BarrettReducer64::new(Q_128_BASIS[1]),
 ];
 
-
-// --- L256 Security Level ---
-// 전체 모듈러스 Q ~= 125 bits (L224와 동일한 모듈러스를 사용하나, 다른 파라미터로 보안성 확보)
-pub const Q_256_BASIS: [u64; 2] = [
-    9223372036854775783,  // 63-bit prime
-    18446744073709551557, // 64-bit prime
+// --- ✅ NEW (RLWE Standard): 192-bit Security Level (n=4096, logQ ≈ 218) ---
+pub const Q_192_BASIS: [u64; 4] = [
+    288230376151748609, // 58-bit
+    288230376152698881, // 58-bit
+    288230376154009601, // 58-bit
+    288230376154501121, // 58-bit
 ];
-// L256은 L224와 동일한 모듈러스 체인을 공유할 수 있습니다.
-pub const MODULUS_CHAIN_256: [u128; 2] = [
-    340282366920938463463374607431768210431, // ~128-bit
-    170141183460469231731687303715884105727, // ~127-bit
-];
-
-
-pub const REDUCERS_128: [BarrettReducer64; 1] = [BarrettReducer64::new(1152921504606584833)];
-pub const REDUCERS_160: [BarrettReducer64; 2] = [
-    BarrettReducer64::new(9223372036854775783),
-    BarrettReducer64::new(13835058055282163713)
-];
-pub const REDUCERS_192: [BarrettReducer64; 2] = [
-    BarrettReducer64::new(9223372036854775783),
-    BarrettReducer64::new(13835058055282163713)
-];
-pub const REDUCERS_224: [BarrettReducer64; 2] = [
-    BarrettReducer64::new(9223372036854775783),
-    BarrettReducer64::new(18446744073709551557)
-];
-pub const REDUCERS_256: [BarrettReducer64; 2] = [
-    BarrettReducer64::new(9223372036854775783),
-    BarrettReducer64::new(18446744073709551557)
+pub const REDUCERS_192: [BarrettReducer64; 4] = [
+    BarrettReducer64::new(Q_192_BASIS[0]),
+    BarrettReducer64::new(Q_192_BASIS[1]),
+    BarrettReducer64::new(Q_192_BASIS[2]),
+    BarrettReducer64::new(Q_192_BASIS[3]),
 ];
 
+// --- ✅ NEW (RLWE Standard): 256-bit Security Level (n=8192, logQ ≈ 438) ---
+pub const Q_256_BASIS: [u64; 8] = [
+    288230376151748609, // 58-bit
+    288230376152698881, // 58-bit
+    288230376154009601, // 58-bit
+    288230376154501121, // 58-bit
+    288230376154566657, // 58-bit
+    288230376155287553, // 58-bit
+    288230376155779073, // 58-bit
+    288230376156172289, // 58-bit
+];
+pub const REDUCERS_256: [BarrettReducer64; 8] = [
+    BarrettReducer64::new(Q_256_BASIS[0]),
+    BarrettReducer64::new(Q_256_BASIS[1]),
+    BarrettReducer64::new(Q_256_BASIS[2]),
+    BarrettReducer64::new(Q_256_BASIS[3]),
+    BarrettReducer64::new(Q_256_BASIS[4]),
+    BarrettReducer64::new(Q_256_BASIS[5]),
+    BarrettReducer64::new(Q_256_BASIS[6]),
+    BarrettReducer64::new(Q_256_BASIS[7]),
+];
 
 pub mod converter;
 pub use converter::{integer_to_rns, rns_to_integer};
-
-use crate::ntt::BarrettReducer64;

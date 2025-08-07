@@ -18,9 +18,7 @@ impl Serialize for SecurityLevel {
         S: serde::Serializer {
         let lv = match *self {
             SecurityLevel::L128 => 128u64,
-            SecurityLevel::L160 => 160u64,
             SecurityLevel::L192 => 192u64,
-            SecurityLevel::L224 => 224u64,
             SecurityLevel::L256 => 256u64
         };
         lv.serialize::<S>(serializer)
@@ -46,9 +44,7 @@ impl<'de> Deserialize<'de> for SecurityLevel {
         if let Ok(parsed) = result {
             match parsed {
                 128u64 => Ok(SecurityLevel::L128),
-                160u64 => Ok(SecurityLevel::L160),
                 192u64 => Ok(SecurityLevel::L192),
-                224u64 => Ok(SecurityLevel::L224),
                 256u64 => Ok(SecurityLevel::L256),
                 _ => Err(NotSupportedSecurityLevelError(parsed)).map_err(serde::de::Error::custom)
             }
