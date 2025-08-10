@@ -5,8 +5,6 @@ pub mod polynomial;
 pub use crate::core::polynomial::Polynomial;
 
 pub mod keys;
-// ✅ RLWE: EvaluationKey를 새로 추가하고 KeySwitchingKey를 대체합니다.
-pub use crate::core::keys::generate_keys;
 
 use crate::ntt::{power, primitive_root, BarrettReducer64};
 
@@ -93,11 +91,11 @@ impl<'a> QfheMinimalParameters<'a> {
     pub fn get_full_params(self) -> QfheParameters<'a> {
         let one: usize = 1;
         // ✅ FIX: `scaling_factor_delta`를 `modulus_q`로부터 동적으로 계산합니다.
-        let q_product = modulus_q.iter().fold(U512Wrapper::ONE, |acc, &m| {
-            acc.widening_mul(&U256::from(*m))
+        let q_product = self.modulus_q.iter().fold(U512Wrapper::ONE, |acc, &m| {
+            acc.widening_mul(&U256::from_u64(m))
         });
         
-        let scaling_factor_delta = q_product.div_rem(&U256::from(plaintext_modulus)).0.to_words()[0] as u128;
+        let scaling_factor_delta = q_product.div_rem(&U256::from(self.plaintext_modulus)).0.to_words()[0] as u128;
         QfheParameters {
             polynomial_degree: (one << self.log2_of_polynomial_degree),
             log2_of_polynomial_degree: self.log2_of_polynomial_degree,
@@ -119,8 +117,8 @@ impl SecurityLevel {
 
     /// 선택된 보안 수준에 맞는 MLWE 파라미터 세트를 반환합니다.
     /// 이 파라미터들은 표준 FHE 및 PQC 문헌을 참고한 예시 값입니다.
-    pub fn get_params(&self) -> QfheParameters<'static, 'static> {
-        let minimal: QfheMinimalParameters<'static, 'static> = match self {
+    pub fn get_params(&self) -> QfheParameters<'static> {
+        let minimal: QfheMinimalParameters<'static> = match self {
             // 128-bit quantum security (NIST Level 1)
             SecurityLevel::L128 => QfheMinimalParameters {
                 log2_of_polynomial_degree: 11,

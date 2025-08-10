@@ -27,7 +27,7 @@ pub trait HardwareBackend<'a> {
     fn generate_public_key(&self, sk: &SecretKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a>) -> PublicKey;
     fn generate_relinearization_key(&self, sk: &SecretKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a>) -> RelinearizationKey;
     fn generate_evaluation_key(&self, old_sk: &Polynomial, new_sk: &SecretKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a>) -> EvaluationKey;
-    fn generate_bootstrap_key(&self, sk: &SecretKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a>) -> BootstrapKey;
+    fn generate_bootstrap_key(&self, sk: &SecretKey, pk: &PublicKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a>) -> BootstrapKey;
 
     // --- 부가 기능 ---
     fn keyswitch(&self, ct: &Ciphertext, evk: &EvaluationKey, params: &QfheParameters<'a>) -> Ciphertext;

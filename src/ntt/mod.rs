@@ -207,7 +207,7 @@ impl<'a> Ntt<'a> for Polynomial {
                     process_plane(&mut soa_poly.z, &[n2048::W_PRIMITIVE_0, n2048::W_PRIMITIVE_1]);
                 });
             }),
-            4096 => {
+            4096 => rayon::scope(|s| {
                 s.spawn(|_| {
                     process_plane(&mut soa_poly.w, &[n4096::W_PRIMITIVE_0, n4096::W_PRIMITIVE_1, n4096::W_PRIMITIVE_2, n4096::W_PRIMITIVE_3]);
                 });
@@ -220,8 +220,8 @@ impl<'a> Ntt<'a> for Polynomial {
                 s.spawn(|_| {
                     process_plane(&mut soa_poly.z, &[n4096::W_PRIMITIVE_0, n4096::W_PRIMITIVE_1, n4096::W_PRIMITIVE_2, n4096::W_PRIMITIVE_3]);
                 });
-            },
-            8192 => {
+            }),
+            8192 => rayon::scope(|s| {
                 s.spawn(|_| {
                     process_plane(&mut soa_poly.w, &[n8192::W_PRIMITIVE_0, n8192::W_PRIMITIVE_1, n8192::W_PRIMITIVE_2, n8192::W_PRIMITIVE_3, n8192::W_PRIMITIVE_4, n8192::W_PRIMITIVE_5, n8192::W_PRIMITIVE_6, n8192::W_PRIMITIVE_7]);
                 });
@@ -234,7 +234,7 @@ impl<'a> Ntt<'a> for Polynomial {
                 s.spawn(|_| {
                     process_plane(&mut soa_poly.z, &[n8192::W_PRIMITIVE_0, n8192::W_PRIMITIVE_1, n8192::W_PRIMITIVE_2, n8192::W_PRIMITIVE_3, n8192::W_PRIMITIVE_4, n8192::W_PRIMITIVE_5, n8192::W_PRIMITIVE_6, n8192::W_PRIMITIVE_7]);
                 });
-            },
+            }),
             _ => unimplemented!("NTT is not supported for polynomial degree: {}", n),
         }
 

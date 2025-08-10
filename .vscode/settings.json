@@ -1,6 +1,8 @@
 {
     "files.associations": {
-        "stdarg.h": "c"
+        "stdarg.h": "c",
+        "01b": "c",
+        "01c": "c"
     },
     "makefile.configureOnOpen": true
 }

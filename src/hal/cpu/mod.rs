@@ -436,11 +436,10 @@ impl<'a> HardwareBackend<'a> for CpuBackend {
     }
 
     /// ✅ RLWE: 부트스트래핑 키 생성 구현. BSK = { GGSW(s1_i) }
-    fn generate_bootstrap_key(&self, sk: &SecretKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a>) -> BootstrapKey {
+    fn generate_bootstrap_key(&self, sk: &SecretKey, pk: &PublicKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a>) -> BootstrapKey {
         let s1 = &sk.s1;
         let n = params.polynomial_degree;
         let rns_size = params.modulus_q.len();
-        let pk = self.generate_public_key(sk, rng, params);
 
         let s1_integer_coeffs: Vec<i128> = (0..n).map(|i| {
             let rns_w = &s1.coeffs[i].w;
@@ -460,18 +459,28 @@ impl<'a> HardwareBackend<'a> for CpuBackend {
         let ggsw_vector: Vec<GgswCiphertext> = (0..n).into_par_iter().map(|i| {
             let mut thread_rng = ChaCha20Rng::from_seed(seeds[i]);
             let mut levels = Vec::with_capacity(params.gadget_levels_l);
-            let s1_i_abs = s1_integer_coeffs[i].unsigned_abs();
+            let s1_i_val = s1_integer_coeffs[i];
             
+            // ✅ [OPTIMIZATION]
+            // Polynomial 할당을 루프 밖으로 이동하여 메모리 할당/해제 오버헤드를 줄입니다.
+            let mut msg_poly = Polynomial::zero(n, rns_size);
+
             for l in 0..params.gadget_levels_l {
                 let power_of_base = params.gadget_base_b.pow(l as u32);
-                let msg_to_encrypt = if s1_integer_coeffs[i] < 0 {
-                    (U256::from(power_of_base) * U256::from(s1_i_abs)).wrapping_neg()
+                let scaled_s1_i = U256::from(power_of_base).wrapping_mul(&U256::from(s1_i_val.unsigned_abs()));
+                
+                let msg_to_encrypt = if s1_i_val < 0 {
+                    scaled_s1_i.wrapping_neg()
                 } else {
-                    U256::from(power_of_base) * U256::from(s1_i_abs)
+                    scaled_s1_i
                 };
                 
-                let mut msg_poly = Polynomial::zero(n, rns_size);
+                // ✅ [OPTIMIZATION]
+                // 할당된 Polynomial 객체를 재사용합니다. 
+                // 0이 아닌 계수는 덮어쓰고, 나머지 계수는 0으로 유지됩니다.
                 msg_poly.coeffs[0].w = integer_to_rns(msg_to_encrypt.to_words()[0] as u128, params.modulus_q);
+                // 만약 이전 반복에서 다른 계수를 사용했다면 0으로 초기화하는 코드가 필요하지만,
+                // 현재 로직에서는 coeffs[0]만 사용하므로 추가 작업이 필요 없습니다.
 
                 levels.push(self.encrypt_internal(&msg_poly, &pk, &mut thread_rng, params));
             }
