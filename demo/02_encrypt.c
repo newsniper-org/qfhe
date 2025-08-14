@@ -20,7 +20,7 @@ int main(int argc, char* argv[]) {
     
     // 1. 역직렬화를 위해 void* 임시 포인터 사용
     void* temp_pk_ptr = NULL;
-    QfheResult status = qfhe_deserialize_key_from_file_binary(&temp_pk_ptr, argv[1]);
+    QfheResult status = qfhe_deserialize_object_from_file(&temp_pk_ptr, argv[1]);
     CHECK_STATUS(status, "Failed to load public key");
     // 2. 실제 타입으로 형변환
     PublicKey* pk = (PublicKey*)temp_pk_ptr;
@@ -33,7 +33,7 @@ int main(int argc, char* argv[]) {
     printf("Encrypting %" PRIu64 " with RLWE scheme...\n", message);
     Ciphertext* ct = qfhe_encrypt(enc_ctx, message);
 
-    status = qfhe_serialize_ciphertext_to_file(ct, level, argv[3]);
+    status = qfhe_serialize_object_to_file(ct, CT, level, argv[3]);
     if (status == Success) {
         printf(" -> Ciphertext saved to %s\n", argv[3]);
     } else {

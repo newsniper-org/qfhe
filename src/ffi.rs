@@ -3,11 +3,11 @@
 use std::ffi::{CString, CStr};
 use std::os::raw::{c_char, c_void}; // c_void 추가
 use std::fs::File;
-use std::io::{BufWriter, Read, BufReader};
+use std::io::{BufWriter, Read, BufReader, SeekFrom};
 
 use crate::core::{
-    keys::BootstrapKey, Ciphertext, keys::EvaluationKey, Polynomial, keys::PublicKey, QfheParameters, 
-    keys::RelinearizationKey, keys::SecretKey, SecurityLevel, keys::MasterKey, keys::Salt,
+    Ciphertext, keys::EvaluationKey, Polynomial, keys::PublicKey, QfheParameters, 
+    keys::RelinearizationKey, keys::SecretKey, SecurityLevel, keys::MasterKey, keys::Salt, GgswCiphertext,
 };
 use crate::hal::{CpuBackend, HardwareBackend};
 use chacha20::cipher::KeyIvInit;
@@ -15,10 +15,24 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use rand_core::OsRng;
 use serde::Deserialize;
-use crate::serialization::{CipherObject, KeyType, Key, parse_key_binary};
+use crate::serialization::{parse_object_binary, QfheObject, ObjectType};
 use serde::{Serialize, de::DeserializeOwned};
 
 use chacha20::{XChaCha20, Key as XChaCha20Key, XNonce, cipher::StreamCipher};
+use memmap2::Mmap;
+
+use crate::core::keys::OnDiskBootstrapKey;
+
+// FFI 함수 반환 타입 정의
+#[repr(C)]
+pub enum QfheResult {
+    Success = 0,
+    IoError = -1,
+    JsonParseError = -2,
+    NullPointerError = -3,
+    Utf8Error = -4,
+}
+
 
 // --- Context Structs ---
 
@@ -32,10 +46,12 @@ pub struct DecryptionContext {
     secret_key: SecretKey,
 }
 
+// ✅ FIX: EvaluationContext가 이제 메모리 맵과 라이프타임을 가집니다.
 pub struct EvaluationContext {
     params: QfheParameters<'static>,
     relinearization_key: Option<Box<RelinearizationKey>>,
-    bootstrap_key: Option<Box<BootstrapKey>>,
+    // ✅ FIX: OnDiskBootstrapKey 객체를 직접 소유
+    bootstrap_key: Option<Box<OnDiskBootstrapKey>>,
     evaluation_key_conj: Option<Box<EvaluationKey>>,
 }
 
@@ -44,13 +60,13 @@ pub struct EvaluationContext {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qfhe_generate_essential_keys(
     level: SecurityLevel,
-    master_key_ptr: *const u8,
+    master_obj_ptr: *const u8,
     salt_ptr: *const u8,
     sk_out: *mut *mut SecretKey,
     pk_out: *mut *mut PublicKey,
     rlk_out: *mut *mut RelinearizationKey,
 ) {
-    let master_key = MasterKey((*unsafe { std::slice::from_raw_parts(master_key_ptr, 32) }).try_into().unwrap());
+    let master_key = MasterKey((*unsafe { std::slice::from_raw_parts(master_obj_ptr, 32) }).try_into().unwrap());
     let salt = Salt((*unsafe { std::slice::from_raw_parts(salt_ptr, 24) }).try_into().unwrap());
     let backend = CpuBackend;
     let params = level.get_params();
@@ -104,22 +120,36 @@ pub unsafe extern "C" fn qfhe_generate_conjugation_key(
 
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn qfhe_generate_bootstrap_key(
+pub unsafe extern "C" fn qfhe_generate_bootstrap_key_to_file(
     level: SecurityLevel,
     sk_ptr: *const SecretKey,
-    pk_ptr: *const PublicKey, // ✅ 공개키 포인터를 인자로 받도록 추가
-    bk_out: *mut *mut BootstrapKey,
-) {
-    let sk = unsafe { &*sk_ptr };
-    let pk = unsafe { &*pk_ptr }; // ✅ 공개키 참조
-    let backend = CpuBackend;
-    let params = level.get_params();
-    let mut os_rng = ChaCha20Rng::from_os_rng();
+    pk_ptr: *const PublicKey,
+    key_path_str: *const c_char,
+    index_path_str: *const c_char,
+) -> QfheResult {
+    // ... (파일 경로 및 포인터 null 체크) ...
+    if key_path_str.is_null() || index_path_str.is_null() {
+        return QfheResult::NullPointerError;
+    }
+    
+    let key_path = match unsafe { CStr::from_ptr(key_path_str).to_str() } {
+        Ok(p) => p,
+        Err(_) => return QfheResult::Utf8Error,
+    };
 
-    // ✅ 부트스트래핑 키 생성 시 pk를 전달
-    let bk = backend.generate_bootstrap_key(sk, pk, &mut os_rng, &params);
-    unsafe { *bk_out = Box::into_raw(Box::new(bk)) };
+    let index_path = match unsafe { CStr::from_ptr(index_path_str).to_str() } {
+        Ok(p) => p,
+        Err(_) => return QfheResult::Utf8Error,
+    };
+
+    match CpuBackend.generate_bootstrap_key(
+        unsafe { &*sk_ptr }, unsafe { &*pk_ptr }, key_path, index_path, &level.get_params()
+    ) {
+        Ok(()) => QfheResult::Success,
+        Err(_) => QfheResult::IoError
+    }
 }
+
 
 // --- Context Management ---
 
@@ -148,21 +178,34 @@ pub unsafe extern "C" fn qfhe_create_decryption_context(level: SecurityLevel, sk
 pub unsafe extern "C" fn qfhe_destroy_decryption_context(ctx: *mut DecryptionContext) {
     if !ctx.is_null() { drop(unsafe { Box::from_raw(ctx) }); }
 }
-
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qfhe_create_evaluation_context(
     level: SecurityLevel,
-    rlk: *const RelinearizationKey,
-    bk: *const BootstrapKey,
-    evk_conj: *const EvaluationKey,
+    rlk_ptr: *const RelinearizationKey,
+    bk_path_str: *const c_char,
+    bk_idx_path_str: *const c_char,
+    evk_conj_ptr: *const EvaluationKey,
 ) -> *mut EvaluationContext {
+    let bootstrap_key = if !bk_path_str.is_null() && !bk_idx_path_str.is_null() {
+        let key_path = unsafe { CStr::from_ptr(bk_path_str).to_str().unwrap() };
+        let index_path = unsafe { CStr::from_ptr(bk_idx_path_str).to_str().unwrap() };
+        
+        match OnDiskBootstrapKey::new(key_path, index_path) {
+            Ok(bk) => Some(Box::new(bk)),
+            Err(_) => return std::ptr::null_mut(),
+        }
+    } else {
+        None
+    };
+
     Box::into_raw(Box::new(EvaluationContext {
         params: level.get_params(),
-        relinearization_key: if rlk.is_null() { None } else { Some(Box::new((unsafe { &*rlk }).clone())) },
-        bootstrap_key: if bk.is_null() { None } else { Some(Box::new((unsafe { &*bk }).clone())) },
-        evaluation_key_conj: if evk_conj.is_null() { None } else { Some(Box::new((unsafe { &*evk_conj }).clone())) },
+        relinearization_key: if rlk_ptr.is_null() { None } else { Some(Box::new((unsafe { &*rlk_ptr }).clone())) },
+        bootstrap_key,
+        evaluation_key_conj: if evk_conj_ptr.is_null() { None } else { Some(Box::new((unsafe { &*evk_conj_ptr }).clone())) },
     }))
 }
+
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qfhe_destroy_evaluation_context(ctx: *mut EvaluationContext) {
@@ -205,10 +248,10 @@ pub unsafe extern "C" fn qfhe_homomorphic_mul(context: *const EvaluationContext,
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn qfhe_bootstrap(context: *const EvaluationContext, ct: *const Ciphertext, test_poly: *const Polynomial) -> *mut Ciphertext {
-    let ctx = unsafe { &*context };
+pub unsafe extern "C" fn qfhe_bootstrap(context: *mut EvaluationContext, ct: *const Ciphertext, test_poly: *const Polynomial) -> *mut Ciphertext {
+    let ctx = unsafe { &mut *context };
     let backend = CpuBackend;
-    let bk = ctx.bootstrap_key.as_ref().expect("BootstrapKey is required for bootstrapping.");
+    let bk = ctx.bootstrap_key.as_mut().expect("BootstrapKey is required for bootstrapping.");
     let res = backend.bootstrap(unsafe { &*ct }, unsafe { &*test_poly }, bk, &ctx.params);
     Box::into_raw(Box::new(res))
 }
@@ -231,61 +274,15 @@ pub extern "C" fn qfhe_create_test_poly_f_2x(level: SecurityLevel) -> *mut Polyn
 // --- Serialization / Deserialization ---
 
 // FFI 함수 반환 타입 정의
-#[repr(C)]
-pub enum QfheResult {
-    Success = 0,
-    IoError = -1,
-    JsonParseError = -2,
-    NullPointerError = -3,
-    Utf8Error = -4,
-}
-
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn qfhe_serialize_key_to_file(
-    key_ptr: *const c_void, // C의 void* 역할
-    key_type: KeyType,
-    level: SecurityLevel,
-    path_str: *const c_char,
-) -> QfheResult {
-    if path_str.is_null() || key_ptr.is_null() {
-        return QfheResult::NullPointerError;
-    }
-    
-    let path = match unsafe { CStr::from_ptr(path_str).to_str() } {
-        Ok(p) => p,
-        Err(_) => return QfheResult::Utf8Error,
-    };
-
-    let file = match File::create(path) {
-        Ok(f) => f,
-        Err(_) => return QfheResult::IoError,
-    };
-
-    let writer = BufWriter::new(file);
-
-    let result = match key_type {
-        KeyType::SK => serde_json::to_writer(writer, unsafe { &*(key_ptr as *const SecretKey) }),
-        KeyType::PK => serde_json::to_writer(writer, unsafe { &*(key_ptr as *const PublicKey) }),
-        KeyType::RLK => serde_json::to_writer(writer, unsafe { &*(key_ptr as *const RelinearizationKey) }),
-        KeyType::BK => serde_json::to_writer(writer, unsafe { &*(key_ptr as *const BootstrapKey) }),
-        KeyType::EVK => serde_json::to_writer(writer, unsafe { &*(key_ptr as *const EvaluationKey) }),
-    };
-
-    match result {
-        Ok(_) => QfheResult::Success,
-        Err(_) => QfheResult::IoError
-    }
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn qfhe_serialize_key_to_file_binary(
-    key_ptr: *const c_void,
-    key_type: KeyType,
+pub unsafe extern "C" fn qfhe_serialize_object_to_file(
+    obj_ptr: *const c_void,
+    object_type: ObjectType,
     level: SecurityLevel, // ✅ 레벨 파라미터 추가
     path_str: *const c_char,
 ) -> QfheResult {
     // ... (null check) ...
-    if path_str.is_null() || key_ptr.is_null() {
+    if path_str.is_null() || obj_ptr.is_null() {
         return QfheResult::NullPointerError;
     }
     
@@ -302,114 +299,27 @@ pub unsafe extern "C" fn qfhe_serialize_key_to_file_binary(
     let mut writer = BufWriter::new(file);
 
     // ✅ 새로운 직렬화 함수 호출
-    let result = match key_type {
-        KeyType::SK => unsafe { &*(key_ptr as *const SecretKey) }.serialize_to_binary(level, &mut writer),
-        KeyType::PK => unsafe { &*(key_ptr as *const PublicKey) }.serialize_to_binary(level, &mut writer),
-        KeyType::RLK => unsafe { &*(key_ptr as *const RelinearizationKey) }.serialize_to_binary(level, &mut writer),
-        KeyType::BK => unsafe { &*(key_ptr as *const BootstrapKey) }.serialize_to_binary(level, &mut writer),
-        KeyType::EVK => unsafe { &*(key_ptr as *const EvaluationKey) }.serialize_to_binary(level, &mut writer)
+    let result = match object_type {
+        ObjectType::CT => unsafe { &*(obj_ptr as *const Ciphertext) }.serialize_to_binary(level, &mut writer),
+        ObjectType::SK => unsafe { &*(obj_ptr as *const SecretKey) }.serialize_to_binary(level, &mut writer),
+        ObjectType::PK => unsafe { &*(obj_ptr as *const PublicKey) }.serialize_to_binary(level, &mut writer),
+        ObjectType::RLK => unsafe { &*(obj_ptr as *const RelinearizationKey) }.serialize_to_binary(level, &mut writer),
+        ObjectType::BK => unimplemented!("In-memory bootstrap key serialization is deprecated. Use the on-disk version by calling the FFI function 'qfhe_generate_bootstrap_key_to_file'."),
+        ObjectType::EVK => unsafe { &*(obj_ptr as *const EvaluationKey) }.serialize_to_binary(level, &mut writer)
     };
     
     if result.is_ok() { QfheResult::Success } else { QfheResult::IoError }
 }
 
-
-
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn qfhe_deserialize_key_from_file(
-    key_type: KeyType,
-    key_out: *mut *mut c_void,
-    path_str: *const c_char,
-) -> QfheResult { // C의 void* 역할
-    if path_str.is_null() || key_out.is_null() {
-        return QfheResult::NullPointerError;
-    }
-
-    // 2. 경로 문자열 변환
-    let path = match unsafe { CStr::from_ptr(path_str).to_str() } {
-        Ok(p) => p,
-        Err(_) => return QfheResult::Utf8Error,
-    };
-
-    // 3. 파일 읽기
-    let json_str = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(_) => return QfheResult::IoError,
-    };
-
-    match key_type {
-        KeyType::SK => {
-            match SecretKey::deserialize(&mut serde_json::Deserializer::from_str(&json_str)) {
-                Ok(key_obj) => {
-                    unsafe { *key_out = Box::into_raw(Box::new(key_obj)) as *mut c_void }
-                    QfheResult::Success
-                },
-                Err(_) => {
-                    unsafe { *key_out = std::ptr::null_mut() };
-                    QfheResult::JsonParseError
-                }
-            }
-        },
-        KeyType::PK => {
-            match PublicKey::deserialize(&mut serde_json::Deserializer::from_str(&json_str)) {
-                Ok(key_obj) => {
-                    unsafe { *key_out = Box::into_raw(Box::new(key_obj)) as *mut c_void }
-                    QfheResult::Success
-                },
-                Err(_) => {
-                    unsafe { *key_out = std::ptr::null_mut() };
-                    QfheResult::JsonParseError
-                }
-            }
-        },
-        KeyType::RLK => {
-            match RelinearizationKey::deserialize(&mut serde_json::Deserializer::from_str(&json_str)) {
-                Ok(key_obj) => {
-                    unsafe { *key_out = Box::into_raw(Box::new(key_obj)) as *mut c_void }
-                    QfheResult::Success
-                },
-                Err(_) => {
-                    unsafe { *key_out = std::ptr::null_mut() };
-                    QfheResult::JsonParseError
-                }
-            }
-        },
-        KeyType::BK => {
-            match BootstrapKey::deserialize(&mut serde_json::Deserializer::from_str(&json_str)) {
-                Ok(key_obj) => {
-                    unsafe { *key_out = Box::into_raw(Box::new(key_obj)) as *mut c_void }
-                    QfheResult::Success
-                },
-                Err(_) => {
-                    unsafe { *key_out = std::ptr::null_mut() };
-                    QfheResult::JsonParseError
-                }
-            }
-        },
-        KeyType::EVK => {
-            match EvaluationKey::deserialize(&mut serde_json::Deserializer::from_str(&json_str)) {
-                Ok(key_obj) => {
-                    unsafe { *key_out = Box::into_raw(Box::new(key_obj)) as *mut c_void }
-                    QfheResult::Success
-                },
-                Err(_) => {
-                    unsafe { *key_out = std::ptr::null_mut() };
-                    QfheResult::JsonParseError
-                }
-            }
-        }
-    }
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn qfhe_deserialize_key_from_file_binary(
-    key_out: *mut *mut c_void,
-    // ✅ KeyType은 더 이상 필요 없음. 헤더에 정보가 포함되기 때문.
-    // key_type: KeyType, 
+pub unsafe extern "C" fn qfhe_deserialize_object_from_file(
+    obj_out: *mut *mut c_void,
+    // ✅ ObjectType은 더 이상 필요 없음. 헤더에 정보가 포함되기 때문.
+    // object_type: ObjectType, 
     path_str: *const c_char,
 ) -> QfheResult {
     // ... (null check) ...
-    if path_str.is_null() || key_out.is_null() {
+    if path_str.is_null() || obj_out.is_null() {
         return QfheResult::NullPointerError;
     }
 
@@ -423,88 +333,25 @@ pub unsafe extern "C" fn qfhe_deserialize_key_from_file_binary(
     };
     let mut reader = BufReader::new(file);
 
-    let result = parse_key_binary(&mut reader);
+    let result = parse_object_binary(&mut reader);
 
     if result.is_err() {
         return QfheResult::IoError;
     }
 
-    let (security_level, key_type, payload) = result.unwrap();
+    let (security_level, object_type, payload) = result.unwrap();
     unsafe {
-        *key_out = match key_type {
-            KeyType::SK => SecretKey::deserialize_from_payload(&payload).map(|k| Box::into_raw(Box::new(k)) as *mut c_void).unwrap_or(std::ptr::null_mut()),
-            KeyType::PK => PublicKey::deserialize_from_payload(&payload).map(|k| Box::into_raw(Box::new(k)) as *mut c_void).unwrap_or(std::ptr::null_mut()),
-            KeyType::RLK => RelinearizationKey::deserialize_from_payload(&payload).map(|k| Box::into_raw(Box::new(k)) as *mut c_void).unwrap_or(std::ptr::null_mut()),
-            KeyType::EVK => EvaluationKey::deserialize_from_payload(&payload).map(|k| Box::into_raw(Box::new(k)) as *mut c_void).unwrap_or(std::ptr::null_mut()),
-            KeyType::BK => BootstrapKey::deserialize_from_payload(&payload).map(|k| Box::into_raw(Box::new(k)) as *mut c_void).unwrap_or(std::ptr::null_mut())
+        *obj_out = match object_type {
+            ObjectType::CT => Ciphertext::deserialize_from_payload(&payload).map(|k| Box::into_raw(Box::new(k)) as *mut c_void).unwrap_or(std::ptr::null_mut()),
+            ObjectType::SK => SecretKey::deserialize_from_payload(&payload).map(|k| Box::into_raw(Box::new(k)) as *mut c_void).unwrap_or(std::ptr::null_mut()),
+            ObjectType::PK => PublicKey::deserialize_from_payload(&payload).map(|k| Box::into_raw(Box::new(k)) as *mut c_void).unwrap_or(std::ptr::null_mut()),
+            ObjectType::RLK => RelinearizationKey::deserialize_from_payload(&payload).map(|k| Box::into_raw(Box::new(k)) as *mut c_void).unwrap_or(std::ptr::null_mut()),
+            ObjectType::EVK => EvaluationKey::deserialize_from_payload(&payload).map(|k| Box::into_raw(Box::new(k)) as *mut c_void).unwrap_or(std::ptr::null_mut()),
+            ObjectType::BK => unimplemented!("In-memory bootstrap key deserialization is deprecated. Use the on-disk version.")
         };
     }
     QfheResult::Success
 }
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn qfhe_serialize_ciphertext_to_file(
-    ct_ptr: *const Ciphertext, // C의 void* 역할
-    level: SecurityLevel,
-    path_str: *const c_char,
-) -> QfheResult {
-    if path_str.is_null() || ct_ptr.is_null() {
-        return QfheResult::NullPointerError;
-    }
-
-    let path = match unsafe { CStr::from_ptr(path_str).to_str() } {
-        Ok(p) => p,
-        Err(_) => return QfheResult::Utf8Error,
-    };
-
-    let file = match File::create(path) {
-        Ok(f) => f,
-        Err(_) => return QfheResult::IoError,
-    };
-
-    let writer = BufWriter::new(file);
-
-    match serde_json::to_writer(writer, &CipherObject {security_level: level, payload: (unsafe { &*ct_ptr }).clone()}) {
-        Ok(_) => QfheResult::Success,
-        Err(_) => QfheResult::IoError
-    }
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn qfhe_deserialize_ciphertext_from_file(
-    ct_out: *mut *mut Ciphertext, // 성공 시 Ciphertext 포인터를 저장할 위치
-    path_str: *const c_char,
-) -> QfheResult {
-    // 1. 입력 포인터 유효성 검사
-    if path_str.is_null() || ct_out.is_null() {
-        return QfheResult::NullPointerError;
-    }
-
-    // 2. 경로 문자열 변환
-    let path = match unsafe { CStr::from_ptr(path_str).to_str() } {
-        Ok(p) => p,
-        Err(_) => return QfheResult::Utf8Error,
-    };
-
-    // 3. 파일 읽기
-    let json_str = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(_) => return QfheResult::IoError,
-    };
-
-    // 4. JSON 역직렬화
-    match CipherObject::deserialize(&mut serde_json::Deserializer::from_str(&json_str)) {
-        Ok(ct_obj) => {
-            unsafe { *ct_out = Box::into_raw(Box::new(ct_obj.payload)) };
-            QfheResult::Success
-        }
-        Err(_) => {
-            unsafe { *ct_out = std::ptr::null_mut() };
-            QfheResult::JsonParseError
-        }
-    }
-}
-
 // --- Memory Management ---
 
 #[unsafe(no_mangle)]
@@ -515,8 +362,6 @@ pub unsafe extern "C" fn qfhe_public_key_destroy(obj: *mut PublicKey) { if !obj.
 pub unsafe extern "C" fn qfhe_relinearization_key_destroy(obj: *mut RelinearizationKey) { if !obj.is_null() { drop(unsafe { Box::from_raw(obj) }); } }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qfhe_evaluation_key_destroy(obj: *mut EvaluationKey) { if !obj.is_null() { drop(unsafe { Box::from_raw(obj) }); } }
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn qfhe_bootstrap_key_destroy(obj: *mut BootstrapKey) { if !obj.is_null() { drop(unsafe { Box::from_raw(obj) }); } }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qfhe_ciphertext_destroy(obj: *mut Ciphertext) { if !obj.is_null() { drop(unsafe { Box::from_raw(obj) }); } }
 #[unsafe(no_mangle)]

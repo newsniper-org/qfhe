@@ -11,37 +11,33 @@
         } \
     } while (0)
 
-#define SAVE_KEY(key_ptr, key_type_enum, level, level_num, suffix) \
+#define SAVE_KEY_BINARY(obj_ptr, object_type, level, suffix) \
     do { \
         char filename[64]; \
-        sprintf(filename, "demo_output/qfhe%d.%s", level_num, suffix); \
-        QfheResult status = qfhe_serialize_key_to_file((const void*)key_ptr, key_type_enum, level, filename); \
-        if (status == Success) { \
-            printf(" -> %s saved.\n", filename); \
-        } else { \
-            fprintf(stderr, "Error: Failed to save %s (code: %d)\n", filename, status); \
-        } \
-    } while (0)
+        sprintf(filename, "demo_output/qfhe128.%s.qkey", suffix); \
+        QfheResult status = qfhe_serialize_object_to_file(obj_ptr, object_type, level, filename); \
+        if (status == Success) { printf(" -> Key saved to '%s'\n", filename); } \
+        else { fprintf(stderr, "Error saving '%s'\n", filename); exit(1); } \
+    } while(0)
 
 int main(void) {
     SecurityLevel level = L128;
-    int level_num = 128;
     char sk_filename[64];
-    sprintf(sk_filename, "demo_output/qfhe%d.sk", level_num);
+    sprintf(sk_filename, "demo_output/qfhe128.sk.qkey");
 
     printf("--- Step 2: Generating Conjugation Key (EVK_conj) ---\n");
-    printf("Loading secret key from %s...\n", sk_filename);
+    printf("Loading secret key from '%s'...\n", sk_filename);
 
     void* temp_sk_ptr = NULL;
-    QfheResult status = qfhe_deserialize_key_from_file_binary(&temp_sk_ptr, sk_filename);
-    CHECK_STATUS(status, "Failed to load secret key. Run '01a_generate_essential_keys' first.");
+    QfheResult status = qfhe_deserialize_object_from_file(&temp_sk_ptr, sk_filename);
+    CHECK_STATUS(status, "Failed to load secret key. Run '01a' first.");
     SecretKey* sk = (SecretKey*)temp_sk_ptr;
 
     EvaluationKey* evk_conj = NULL;
     qfhe_generate_conjugation_key(level, sk, &evk_conj);
     printf("Conjugation key generated. Saving key...\n");
 
-    SAVE_KEY(evk_conj, EVK, level, level_num, "evk_conj");
+    SAVE_KEY_BINARY(evk_conj, EVK, level, "evk_conj");
 
     qfhe_secret_key_destroy(sk);
     qfhe_evaluation_key_destroy(evk_conj);

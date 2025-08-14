@@ -1,7 +1,7 @@
 // src/hal/mod.rs
 
 use crate::core::{Ciphertext, Polynomial, QfheParameters};
-use crate::core::keys::{SecretKey, RelinearizationKey, EvaluationKey, BootstrapKey, PublicKey};
+use crate::core::keys::{SecretKey, RelinearizationKey, EvaluationKey, OnDiskBootstrapKey, PublicKey};
 
 use rand_chacha::ChaCha20Rng;
 
@@ -27,11 +27,11 @@ pub trait HardwareBackend<'a> {
     fn generate_public_key(&self, sk: &SecretKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a>) -> PublicKey;
     fn generate_relinearization_key(&self, sk: &SecretKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a>) -> RelinearizationKey;
     fn generate_evaluation_key(&self, old_sk: &Polynomial, new_sk: &SecretKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a>) -> EvaluationKey;
-    fn generate_bootstrap_key(&self, sk: &SecretKey, pk: &PublicKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a>) -> BootstrapKey;
+    fn generate_bootstrap_key(&self, sk: &SecretKey, pk: &PublicKey, key_path: &str, index_path: &str, params: &QfheParameters<'a>) -> Result<(), std::io::Error>;
 
     // --- 부가 기능 ---
     fn keyswitch(&self, ct: &Ciphertext, evk: &EvaluationKey, params: &QfheParameters<'a>) -> Ciphertext;
-    fn bootstrap(&self, ct: &Ciphertext, test_poly: &Polynomial, bk: &BootstrapKey, params: &QfheParameters<'a>) -> Ciphertext;
+    fn bootstrap(&self, ct: &Ciphertext, test_poly: &Polynomial, bk: &mut OnDiskBootstrapKey, params: &QfheParameters<'a>) -> Ciphertext;
     fn modulus_switch(&self, ct: &Ciphertext, new_modulus: u64) -> (Vec<u64>, Vec<u64>);
 }
 

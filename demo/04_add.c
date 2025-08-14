@@ -17,12 +17,12 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    Ciphertext* ct1 = NULL;
-    QfheResult status = qfhe_deserialize_ciphertext_from_file(&ct1, argv[1]);
+    void* ct1 = NULL;
+    QfheResult status = qfhe_deserialize_object_from_file(&ct1, argv[1]);
     CHECK_STATUS(status, "Failed to load first ciphertext");
 
-    Ciphertext* ct2 = NULL;
-    status = qfhe_deserialize_ciphertext_from_file(&ct2, argv[2]);
+    void* ct2 = NULL;
+    status = qfhe_deserialize_object_from_file(&ct2, argv[2]);
     CHECK_STATUS(status, "Failed to load second ciphertext");
 
     SecurityLevel level = L128;
@@ -30,7 +30,7 @@ int main(int argc, char* argv[]) {
     printf("Performing homomorphic addition...\n");
     Ciphertext* ct_add = qfhe_homomorphic_add(ct1, ct2, level);
     
-    status = qfhe_serialize_ciphertext_to_file(ct_add, level, argv[3]);
+    status = qfhe_serialize_object_to_file(ct_add, CT, level, argv[3]);
     if (status == Success) {
         printf(" -> Result saved to %s\n", argv[3]);
     } else {

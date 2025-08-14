@@ -53,7 +53,7 @@ $(LIB_PATH): src/lib.rs src/core/mod.rs src/hal/mod.rs src/ffi.rs Cargo.toml bui
 	@echo "Rust library '$(LIB_NAME)' built."
 
 # A full demonstration flow
-demo-gen-ess-keys: build
+demo-gen-ess-keys:
 	@mkdir -p demo_output
 	@echo "\n--- 1a. Generating Essential Keys (Fast) ---"
 	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR) ./bin/debug/01a_generate_essential_keys
@@ -69,27 +69,27 @@ demo-gen-boot-keys:
 
 demo-encrypt:
 	@echo "\n--- 2. Encrypting 42 and 10 ---"
-	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/debug/02_encrypt ./bin/debug/02_encrypt demo_output/qfhe128.pk 42 demo_output/ct_42.ct
-	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/debug/02_encrypt ./bin/debug/02_encrypt demo_output/qfhe128.pk 10 demo_output/ct_10.ct
+	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/debug/02_encrypt ./bin/debug/02_encrypt demo_output/qfhe128.pk.qkey 42 demo_output/ct_42.ct
+	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/debug/02_encrypt ./bin/debug/02_encrypt demo_output/qfhe128.pk.qkey 10 demo_output/ct_10.ct
 
 demo-decrypt:
 	@echo "\n--- 3. Decrypting 42 and 10 to verify ---"
-	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/debug/03_decrypt ./bin/debug/03_decrypt demo_output/ct_42.ct demo_output/qfhe128.sk
-	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/debug/03_decrypt ./bin/debug/03_decrypt demo_output/ct_10.ct demo_output/qfhe128.sk
+	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/debug/03_decrypt ./bin/debug/03_decrypt demo_output/ct_42.ct demo_output/qfhe128.sk.qkey
+	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/debug/03_decrypt ./bin/debug/03_decrypt demo_output/ct_10.ct demo_output/qfhe128.sk.qkey
 
 demo-add:
 	@echo "\n--- 4. Homomorphic Addition (42 + 10 = 52) ---"
 	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/debug/04_add ./bin/debug/04_add demo_output/ct_42.ct demo_output/ct_10.ct demo_output/ct_add_52.ct
-	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/debug/03_decrypt ./bin/debug/03_decrypt demo_output/ct_add_52.ct demo_output/qfhe128.sk
+	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/debug/03_decrypt ./bin/debug/03_decrypt demo_output/ct_add_52.ct demo_output/qfhe128.sk.qkey
 
 demo-mul:
 	@echo "\n--- 5. Homomorphic Multiplication (52 * 10 = 520) ---"
-	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/debug/05_mul ./bin/debug/05_mul demo_output/ct_add_52.ct demo_output/ct_10.ct demo_output/qfhe128.rlk demo_output/ct_mul_520.ct
-	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/debug/03_decrypt ./bin/debug/03_decrypt demo_output/ct_mul_520.ct demo_output/qfhe128.sk
+	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/debug/05_mul ./bin/debug/05_mul demo_output/ct_add_52.ct demo_output/ct_10.ct demo_output/qfhe128.rlk.qkey demo_output/ct_mul_520.ct
+	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/debug/03_decrypt ./bin/debug/03_decrypt demo_output/ct_mul_520.ct demo_output/qfhe128.sk.qkey
 
 demo-bootstrap:
 	@echo "\n--- 6. Bootstrapping (f(520) = 2*520 = 1040) ---"
-	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/debug/06_bootstrap ./bin/debug/06_bootstrap demo_output/ct_mul_520.ct demo_output/qfhe128.sk demo_output/qfhe128.bk demo_output/ct_pbs_1040.ct
+	LD_LIBRARY_PATH=$(RUST_TARGET_DIR) DYLD_LIBRARY_PATH=$(RUST_TARGET_DIR)./bin/debug/06_bootstrap ./bin/debug/06_bootstrap demo_output/ct_mul_520.ct demo_output/qfhe128.sk.qkey demo_output/qfhe128.bk.qkey demo_output/ct_pbs_1040.ct
 
 # Clean up build artifacts
 clean-bin:

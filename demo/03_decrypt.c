@@ -18,12 +18,12 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    Ciphertext* ct = NULL;
-    QfheResult status = qfhe_deserialize_ciphertext_from_file(&ct, argv[1]);
+    void* ct = NULL;
+    QfheResult status = qfhe_deserialize_object_from_file((&ct), argv[1]);
     CHECK_STATUS(status, "Failed to load ciphertext");
 
     void* temp_sk_ptr = NULL;
-    status = qfhe_deserialize_key_from_file_binary(&temp_sk_ptr, argv[2]);
+    status = qfhe_deserialize_object_from_file(&temp_sk_ptr, argv[2]);
     CHECK_STATUS(status, "Failed to load secret key");
     SecretKey* sk = (SecretKey*)temp_sk_ptr;
     

@@ -17,26 +17,26 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    Ciphertext* ct1 = NULL;
-    QfheResult status = qfhe_deserialize_ciphertext_from_file(&ct1, argv[1]);
+    void* ct1 = NULL;
+    QfheResult status = qfhe_deserialize_object_from_file(&ct1, argv[1]);
     CHECK_STATUS(status, "Failed to load first ciphertext");
 
-    Ciphertext* ct2 = NULL;
-    status = qfhe_deserialize_ciphertext_from_file(&ct2, argv[2]);
+    void* ct2 = NULL;
+    status = qfhe_deserialize_object_from_file(&ct2, argv[2]);
     CHECK_STATUS(status, "Failed to load second ciphertext");
 
     void* temp_rlk_ptr = NULL;
-    status = qfhe_deserialize_key_from_file_binary(&temp_rlk_ptr, argv[3]);
+    status = qfhe_deserialize_object_from_file(&temp_rlk_ptr, argv[3]);
     CHECK_STATUS(status, "Failed to load relinearization key");
     RelinearizationKey* rlk = (RelinearizationKey*)temp_rlk_ptr;
 
     SecurityLevel level = L128;
-    EvaluationContext* eval_ctx = qfhe_create_evaluation_context(level, rlk, NULL, NULL); 
+    EvaluationContext* eval_ctx = qfhe_create_evaluation_context(level, rlk, NULL, NULL, NULL); 
 
     printf("Performing homomorphic multiplication...\n");
     Ciphertext* ct_mul = qfhe_homomorphic_mul(eval_ctx, ct1, ct2);
     
-    status = qfhe_serialize_ciphertext_to_file(ct_mul, level, argv[4]);
+    status = qfhe_serialize_object_to_file(ct_mul, CT, level, argv[4]);
     if (status == Success) {
         printf(" -> Result saved to %s\n", argv[4]);
     } else {

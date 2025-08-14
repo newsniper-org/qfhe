@@ -3,7 +3,7 @@
 // src/hal/cpu/mod.rs
 
 use crate::core::{
-    Ciphertext, GgswCiphertext, Polynomial, QfheParameters, keys::{RelinearizationKey, SecretKey, BootstrapKey, EvaluationKey, PublicKey}
+    Ciphertext, GgswCiphertext, Polynomial, QfheParameters, keys::{RelinearizationKey, SecretKey, OnDiskBootstrapKey, EvaluationKey, PublicKey}
 };
 use super::HardwareBackend;
 use rand::{Rng, RngCore, SeedableRng};
@@ -16,6 +16,14 @@ use crypto_bigint::{U256, NonZero};
 
 use rayon::prelude::*;
 pub struct CpuBackend;
+
+use crate::serialization::*;
+
+use std::io::{Write, Seek, SeekFrom, BufWriter, BufReader};
+
+use std::fs::File;
+
+use bincode::Options;
 
 // ✅ RLWE: 모든 샘플링 함수는 그대로 재사용 가능
 fn sample_discrete_gaussian<R: Rng + ?Sized>(noise_std_dev: f64, rng: &mut R) -> i128 {
@@ -78,15 +86,88 @@ fn ciphertext_rotation(ct: &Ciphertext, k: i128, params: &QfheParameters) -> Cip
 }
 
 impl<'a> CpuBackend {
+    /// 기존 Polynomial 버퍼에 가우시안 샘플링 결과를 덮어씁니다.
+    fn sample_gaussian_poly_in_place(&self, poly: &mut Polynomial, std_dev: f64, rng: &mut ChaCha20Rng, params: &QfheParameters<'a>) {
+        let rns_size = params.modulus_q.len();
+        let handle_noise = |noise: i128| -> Vec<u64> {
+            let mut rns_noise = integer_to_rns(noise.unsigned_abs(), params.modulus_q);
+            if noise < 0 {
+                for j in 0..rns_size {
+                    rns_noise[j] = params.modulus_q[j].wrapping_sub(rns_noise[j]);
+                }
+            }
+            rns_noise
+        };
+        for coeff in poly.coeffs.iter_mut() {
+            coeff.w = handle_noise(sample_discrete_gaussian(std_dev, rng));
+            coeff.x = handle_noise(sample_discrete_gaussian(std_dev, rng));
+            coeff.y = handle_noise(sample_discrete_gaussian(std_dev, rng));
+            coeff.z = handle_noise(sample_discrete_gaussian(std_dev, rng));
+        }
+    }
+
+    /// `res` 버퍼에 `p1 + p2`의 결과를 덮어씁니다.
+    fn polynomial_add_in_place(&self, res: &mut Polynomial, p1: &Polynomial, p2: &Polynomial, params: &QfheParameters<'a>) {
+        for i in 0..params.polynomial_degree {
+            for j in 0..params.modulus_q.len() {
+                let q_j = params.modulus_q[j];
+                res.coeffs[i].w[j] = p1.coeffs[i].w[j].safe_add_mod(p2.coeffs[i].w[j], q_j);
+                res.coeffs[i].x[j] = p1.coeffs[i].x[j].safe_add_mod(p2.coeffs[i].x[j], q_j);
+                res.coeffs[i].y[j] = p1.coeffs[i].y[j].safe_add_mod(p2.coeffs[i].y[j], q_j);
+                res.coeffs[i].z[j] = p1.coeffs[i].z[j].safe_add_mod(p2.coeffs[i].z[j], q_j);
+            }
+        }
+    }
+    
+    /// `res` 버퍼에 `p1 * p2`의 결과를 덮어씁니다.
+    fn polynomial_mul_in_place(&self, res: &mut Polynomial, p1: &Polynomial, p2: &Polynomial, params: &QfheParameters<'a>) {
+        let mut p1_ntt = p1.clone();
+        let mut p2_ntt = p2.clone();
+        qntt_forward(&mut p1_ntt, params);
+        qntt_forward(&mut p2_ntt, params);
+        qntt_pointwise_mul(&mut p1_ntt, &p2_ntt, params);
+        qntt_inverse(&mut p1_ntt, params);
+        res.coeffs.clone_from_slice(&p1_ntt.coeffs);
+    }
+    
+    /// 메모리 할당 없이 암호화를 수행하고 `result_ct` 버퍼에 결과를 씁니다.
+    fn encrypt_internal_fast(
+        &self,
+        result_ct: &mut Ciphertext,
+        msg_poly: &Polynomial,
+        pk: &PublicKey,
+        // Pre-allocated buffers
+        u: &mut Polynomial,
+        e0: &mut Polynomial,
+        e1: &mut Polynomial,
+        tmp1: &mut Polynomial,
+        tmp2: &mut Polynomial,
+        rng: &mut ChaCha20Rng,
+        params: &QfheParameters<'a>,
+    ) {
+        self.sample_gaussian_poly_in_place(u, params.noise_std_dev, rng, params);
+        self.sample_gaussian_poly_in_place(e0, params.noise_std_dev, rng, params);
+        self.sample_gaussian_poly_in_place(e1, params.noise_std_dev, rng, params);
+
+        self.polynomial_mul_in_place(tmp1, &pk.b, u, params);
+        self.polynomial_add_in_place(tmp2, tmp1, e0, params);
+        self.polynomial_add_in_place(&mut result_ct.c0, tmp2, msg_poly, params);
+
+        self.polynomial_mul_in_place(tmp1, &pk.a, u, params);
+        self.polynomial_add_in_place(&mut result_ct.c1, tmp1, e1, params);
+        
+        result_ct.modulus_level = 0;
+    }
+
     fn sample_uniform_poly(n: usize, rns_size: usize, rng: &mut ChaCha20Rng, params: &QfheParameters<'a>) -> Polynomial {
         let mut poly = Polynomial::zero(n, rns_size);
         for i in 0..n {
             for j in 0..rns_size {
                 let q_j = params.modulus_q[j];
-                poly.coeffs[i].w[j] = rng.r#gen::<u64>() % q_j;
-                poly.coeffs[i].x[j] = rng.r#gen::<u64>() % q_j;
-                poly.coeffs[i].y[j] = rng.r#gen::<u64>() % q_j;
-                poly.coeffs[i].z[j] = rng.r#gen::<u64>() % q_j;
+                poly.coeffs[i].w[j] = rng.random::<u64>() % q_j;
+                poly.coeffs[i].x[j] = rng.random::<u64>() % q_j;
+                poly.coeffs[i].y[j] = rng.random::<u64>() % q_j;
+                poly.coeffs[i].z[j] = rng.random::<u64>() % q_j;
             }
         }
         poly
@@ -436,63 +517,91 @@ impl<'a> HardwareBackend<'a> for CpuBackend {
     }
 
     /// ✅ RLWE: 부트스트래핑 키 생성 구현. BSK = { GGSW(s1_i) }
-    fn generate_bootstrap_key(&self, sk: &SecretKey, pk: &PublicKey, rng: &mut ChaCha20Rng, params: &QfheParameters<'a>) -> BootstrapKey {
-        let s1 = &sk.s1;
+    fn generate_bootstrap_key(
+        &self, sk: &SecretKey, pk: &PublicKey,
+        key_path: &str, index_path: &str, params: &QfheParameters<'a>
+    ) -> Result<(), std::io::Error> {
+        // 1. 키 파일과 인덱스 파일을 생성하고 버퍼를 연결합니다.
+        let key_file = File::create(key_path)?;
+        let index_file = File::create(index_path)?;
+        let mut key_writer = BufWriter::new(key_file);
+        let mut index_writer = BufWriter::new(index_file);
+
         let n = params.polynomial_degree;
         let rns_size = params.modulus_q.len();
-
-        let s1_integer_coeffs: Vec<i128> = (0..n).map(|i| {
-            let rns_w = &s1.coeffs[i].w;
+        let mut master_rng = ChaCha20Rng::from_os_rng();
+        let s1_integer_coeff_seed_pairs: Vec<([u8; 32], i128)> = (0..n).map(|i| {
+            let rns_w = &sk.s1.coeffs[i].w;
             let integer_w = rns_to_integer(rns_w, params.modulus_q);
             let q_product = params.modulus_q.iter().fold(U256::ONE, |acc, &m| acc.wrapping_mul(&U256::from_u64(m)));
             let q_half = q_product >> 1;
-            if integer_w > q_half {
-                -((q_product - integer_w).to_words()[0] as i128)
-            } else {
-                integer_w.to_words()[0] as i128
-            }
+            let s1_val = if integer_w > q_half { -((q_product - integer_w).to_words()[0] as i128) } 
+                else { integer_w.to_words()[0] as i128 };
+            (master_rng.random::<[u8; 32]>(), s1_val)
         }).collect();
 
-        // ✅ FIX (Rust 2024): 병렬 처리를 위해 각 스레드가 사용할 시드를 미리 생성합니다.
-        let seeds: Vec<[u8; 32]> = (0..n).map(|_| rng.random()).collect();
+        // 연산에 필요한 버퍼들을 루프 밖에서 '한 번만' 할당하여 재사용합니다.
+        let mut u = Polynomial::zero(n, rns_size);
+        let mut e0 = Polynomial::zero(n, rns_size);
+        let mut e1 = Polynomial::zero(n, rns_size);
+        let mut tmp1 = Polynomial::zero(n, rns_size);
+        let mut tmp2 = Polynomial::zero(n, rns_size);
+        let mut msg_poly = Polynomial::zero(n, rns_size);
+        let mut result_ct_buffer = Ciphertext {
+            c0: Polynomial::zero(n, rns_size), c1: Polynomial::zero(n, rns_size), modulus_level: 0
+        };
 
-        let ggsw_vector: Vec<GgswCiphertext> = (0..n).into_par_iter().map(|i| {
-            let mut thread_rng = ChaCha20Rng::from_seed(seeds[i]);
-            let mut levels = Vec::with_capacity(params.gadget_levels_l);
-            let s1_i_val = s1_integer_coeffs[i];
+
+        for (i, (seed, s1_val)) in s1_integer_coeff_seed_pairs.iter().enumerate() {
+            // 2. 현재 키 파일의 위치(offset)를 가져옵니다.
+            let current_offset = key_writer.stream_position()?;
             
-            // ✅ [OPTIMIZATION]
-            // Polynomial 할당을 루프 밖으로 이동하여 메모리 할당/해제 오버헤드를 줄입니다.
-            let mut msg_poly = Polynomial::zero(n, rns_size);
+            // 3. 오프셋을 Big-Endian 바이트로 변환하여 인덱스 파일에 씁니다.
+            index_writer.write_all(&current_offset.to_be_bytes())?;
 
-            for l in 0..params.gadget_levels_l {
-                let power_of_base = params.gadget_base_b.pow(l as u32);
-                let scaled_s1_i = U256::from(power_of_base).wrapping_mul(&U256::from(s1_i_val.unsigned_abs()));
-                
-                let msg_to_encrypt = if s1_i_val < 0 {
-                    scaled_s1_i.wrapping_neg()
-                } else {
-                    scaled_s1_i
-                };
-                
-                // ✅ [OPTIMIZATION]
-                // 할당된 Polynomial 객체를 재사용합니다. 
-                // 0이 아닌 계수는 덮어쓰고, 나머지 계수는 0으로 유지됩니다.
-                msg_poly.coeffs[0].w = integer_to_rns(msg_to_encrypt.to_words()[0] as u128, params.modulus_q);
-                // 만약 이전 반복에서 다른 계수를 사용했다면 0으로 초기화하는 코드가 필요하지만,
-                // 현재 로직에서는 coeffs[0]만 사용하므로 추가 작업이 필요 없습니다.
+            // 4. 단일 GGSW 암호문을 생성합니다. (메모리 효율적인 방식 사용)
+            let ggsw_ct = {
+                let mut thread_rng = ChaCha20Rng::from_seed(*seed);
+                let mut levels = Vec::with_capacity(params.gadget_levels_l);
 
-                levels.push(self.encrypt_internal(&msg_poly, &pk, &mut thread_rng, params));
-            }
-            GgswCiphertext { levels }
-        }).collect();
+                for l in 0..params.gadget_levels_l {
+                    let power_of_base = params.gadget_base_b.pow(l as u32);
+                    let scaled_s1_i = U256::from(power_of_base).wrapping_mul(&U256::from(s1_val.unsigned_abs()));
+                    let msg_to_encrypt = if *s1_val < 0 { scaled_s1_i.wrapping_neg() } else { scaled_s1_i };
+                    
+                    msg_poly.coeffs[0].w = integer_to_rns(msg_to_encrypt.to_words()[0] as u128, params.modulus_q);
 
-        BootstrapKey { ggsw_vector }
+                    self.encrypt_internal_fast(
+                        &mut result_ct_buffer, &msg_poly, pk,
+                        &mut u, &mut e0, &mut e1, &mut tmp1, &mut tmp2,
+                        &mut thread_rng, params,
+                    );
+                    levels.push(result_ct_buffer.clone());
+                }
+
+                GgswCiphertext { levels }
+            };
+
+            // 5. 생성된 GGSW 암호문을 키 파일에 직렬화하여 씁니다.
+            get_bincode_options().serialize_into(&mut key_writer, &ggsw_ct)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
+            eprint!("\rProgress: {i}/{n} done...");
+        }
+        eprint!("\rProgress: {n}/{n} done. Flushing key and index files...");
+
+        // 6. 모든 쓰기가 완료되면 파일을 플러시하여 디스크에 기록을 보장합니다.
+        key_writer.flush()?;
+        index_writer.flush()?;
+
+        eprintln!("\rBootstrap key generation completed!");
+
+        Ok(())
     }
 
     /// ✅ RLWE: 프로그래머블 부트스트래핑 완전 구현
-    fn bootstrap(&self, ct: &Ciphertext, test_poly: &Polynomial, bk: &BootstrapKey, params: &QfheParameters<'a>) -> Ciphertext {
-        let n = params.polynomial_degree;
+    fn bootstrap(&self, ct: &Ciphertext, test_poly: &Polynomial, bk: &mut OnDiskBootstrapKey, params: &QfheParameters<'a>) -> Ciphertext {
+    let n = params.polynomial_degree;
         let rns_size = params.modulus_q.len();
         let new_modulus = (2 * n) as u64;
 
@@ -515,7 +624,10 @@ impl<'a> HardwareBackend<'a> for CpuBackend {
             
             // ✅ FIX: accumulator(암호문)를 회전시키기 위해 ciphertext_rotation 사용
             let rotated_acc = ciphertext_rotation(&accumulator, a_i_bar as i128, params);
-            accumulator = self.cmux(&bk.ggsw_vector[i], &accumulator, &rotated_acc, params);
+        
+            // ✅ 디스크에서 필요한 GGSW 암호문을 즉시 로드하여 사용
+            let ggsw_gate = bk.get(i).expect("Failed to read GGSW ciphertext from disk file.");
+            accumulator = self.cmux(&ggsw_gate, &accumulator, &rotated_acc, params);
         }
 
         accumulator

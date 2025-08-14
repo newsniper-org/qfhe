@@ -30,6 +30,8 @@ use serde::{Serialize, Deserialize};
 
 use crypto_bigint::{U256, U512};
 
+
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct U512Wrapper(U512);
 
@@ -65,6 +67,7 @@ pub enum SecurityLevel {
 /// 각 보안 수준에 맞는 파라미터 세트를 담는 구조체입니다.
 #[derive(Debug, Clone)]
 pub struct QfheParameters<'a> {
+    pub security_level: SecurityLevel,
     pub polynomial_degree: usize,
     pub log2_of_polynomial_degree: usize,
     pub modulus_q: &'a [u64],
@@ -88,7 +91,7 @@ pub struct QfheMinimalParameters<'a> {
 }
 
 impl<'a> QfheMinimalParameters<'a> {
-    pub fn get_full_params(self) -> QfheParameters<'a> {
+    pub fn get_full_params(self, level: &SecurityLevel) -> QfheParameters<'a> {
         let one: usize = 1;
         // ✅ FIX: `scaling_factor_delta`를 `modulus_q`로부터 동적으로 계산합니다.
         let q_product = self.modulus_q.iter().fold(U512Wrapper::ONE, |acc, &m| {
@@ -97,6 +100,7 @@ impl<'a> QfheMinimalParameters<'a> {
         
         let scaling_factor_delta = q_product.div_rem(&U256::from(self.plaintext_modulus)).0.to_words()[0] as u128;
         QfheParameters {
+            security_level: *level,
             polynomial_degree: (one << self.log2_of_polynomial_degree),
             log2_of_polynomial_degree: self.log2_of_polynomial_degree,
             modulus_q: self.modulus_q,
@@ -150,7 +154,7 @@ impl SecurityLevel {
                 reducers: &REDUCERS_256
             }
         };
-        minimal.get_full_params()
+        minimal.get_full_params(self)
     }
 }
 
@@ -163,7 +167,8 @@ pub struct Ciphertext {
 }
 
 /// GGSW 암호문은 부트스트래핑의 핵심 요소입니다.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[repr(C)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct GgswCiphertext {
     pub levels: Vec<Ciphertext>,
 }

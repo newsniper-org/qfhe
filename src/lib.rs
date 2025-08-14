@@ -9,16 +9,16 @@ pub mod serialization;
 
 pub use crate::core::{
     Ciphertext, Polynomial, QfheParameters, SecurityLevel, Quaternion,
-    keys::{BootstrapKey, EvaluationKey, SecretKey, PublicKey, RelinearizationKey}
+    keys::{EvaluationKey, SecretKey, PublicKey, RelinearizationKey}
 };
 pub use crate::hal::{HardwareBackend, cpu::CpuBackend};
 pub use crate::ffi::{EvaluationContext, EncryptionContext, DecryptionContext};
-pub use crate::serialization::{CipherObject, KeyType};
+pub use crate::serialization::ObjectType;
 
 // ✅ RLWE: 테스트 모듈 전체를 새로운 API에 맞게 재작성
 #[cfg(test)]
 mod tests {
-    use crate::{BootstrapKey, Polynomial};
+    use crate::{Polynomial};
 
     use super::core::{keys::{generate_keys, MasterKey, Salt, SecretKey, PublicKey}, SecurityLevel};
     use super::hal::{cpu::CpuBackend, HardwareBackend};
@@ -27,7 +27,7 @@ mod tests {
     use rand_core::OsRng;
 
     // 테스트를 위한 공통 설정
-    fn setup_keys(level: SecurityLevel) -> (crate::core::keys::SecretKey, crate::core::keys::PublicKey, crate::core::keys::RelinearizationKey, crate::core::keys::EvaluationKey, crate::core::keys::BootstrapKey) {
+    fn setup_keys(level: SecurityLevel) -> (crate::core::keys::SecretKey, crate::core::keys::PublicKey, crate::core::keys::RelinearizationKey, crate::core::keys::EvaluationKey) {
         let master_key = MasterKey(rand::random());
         let salt = Salt(rand::random());
         let backend = CpuBackend;
